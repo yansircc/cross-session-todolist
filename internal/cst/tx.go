@@ -1,0 +1,747 @@
+package cst
+
+import (
+	"encoding/json"
+	"errors"
+	"time"
+)
+
+// Tx is a single store transaction. It carries a coherent snapshot built
+// from one replay under one held lock, plus a queue of events to commit
+// when the transaction closes successfully. Mutation primitives append into
+// the queue; nothing reaches disk until WithStore commits.
+type Tx struct {
+	cfg     Config
+	state   *State
+	actor   string
+	now     time.Time
+	pending []*Event
+}
+
+type TxOpts struct {
+	// Mutating: true if the transaction is allowed to append events. Read
+	// commands open with mutating=false; lazy-abandon repair is the only
+	// exception and runs in its own scope.
+	Mutating bool
+	// RepairLease: if true, lazy-abandon expired claims and reload state
+	// before fn runs. Explicit event stream reads run outside Tx.
+	RepairLease bool
+}
+
+// WithStore wraps the load-cfg → lock → replay → fn → append loop so handlers
+// don't open-code it (and can't accidentally drift on, say, lease repair).
+// Errors from fn propaacceptance; pending events commit only on success.
+func WithStore(opts TxOpts, fn func(*Tx) error) error {
+	cfg, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	lock, err := AcquireLock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
+	events, err := Replay()
+	if err != nil {
+		return err
+	}
+	state, err := Apply(events)
+	if err != nil {
+		return err
+	}
+	actor := ResolveActor(cfg.ActorDefault)
+	now := time.Now()
+
+	if opts.RepairLease {
+		if abandoned := state.LazyAbandonExpired(now); len(abandoned) > 0 {
+			if err := Append(abandoned...); err != nil {
+				return err
+			}
+			events = append(events, abandoned...)
+			state, err = Apply(events)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	tx := &Tx{cfg: cfg, state: state, actor: actor, now: now}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if len(tx.pending) > 0 {
+		if !opts.Mutating {
+			return errors.New("internal: read-only tx attempted to write events")
+		}
+		return Append(tx.pending...)
+	}
+	return nil
+}
+
+// Snapshot exposes the tx's read view to handlers without granting write
+// access. Callers may inspect but must mutate only via Tx primitives.
+func (tx *Tx) Snapshot() *State { return tx.state }
+func (tx *Tx) Cfg() Config      { return tx.cfg }
+func (tx *Tx) Actor() string    { return tx.actor }
+
+// CreateGoal appends an aggregate node. The root goal is the only parent==0
+// node in a store; child goals must live under another goal.
+func (tx *Tx) CreateGoal(parent int64, intent string) (*Event, error) {
+	if intent == "" {
+		return nil, herr(ExitUsage, "goal requires --intent")
+	}
+	if parent == 0 {
+		if existing := tx.state.AnyRoot(); existing != nil {
+			return nil, herr(ExitInvariantBroken,
+				"store already has root goal #%d; a cst store has one root for life",
+				existing.ID)
+		}
+	} else {
+		p, ok := tx.state.Nodes[parent]
+		if !ok {
+			return nil, herr(ExitNotFound, "parent #%d not found", parent)
+		}
+		if p.Terminal() {
+			return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
+		}
+		if p.Kind != KindGoal {
+			return nil, herr(ExitInvariantBroken, "goal parent must be a goal; #%d is %s", parent, p.Kind)
+		}
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeCreated,
+		NodeID:    tx.state.NextID,
+		ParentID:  parent,
+		Kind:      KindGoal,
+		Intent:    intent,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// CreateTask appends a node_created event for an executable task. Tasks must
+// live under a goal or another task and must declare acceptance. Readiness
+// prerequisites are independent `after` edges.
+func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, after []int64) (*Event, error) {
+	if intent == "" {
+		return nil, herr(ExitUsage, "task requires --intent")
+	}
+	if acceptance == nil {
+		return nil, herr(ExitUsage, "task requires acceptance (--verify or --review)")
+	}
+	if parent == 0 {
+		return nil, herr(ExitUsage, "task requires --parent; root is a goal")
+	}
+	p, ok := tx.state.Nodes[parent]
+	if !ok {
+		return nil, herr(ExitNotFound, "parent #%d not found", parent)
+	}
+	if p.Terminal() {
+		return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
+	}
+	if !p.CanParentWork() {
+		return nil, herr(ExitInvariantBroken, "parent #%d is %s, not a goal/task", parent, p.Kind)
+	}
+	if err := tx.validateAfter(tx.state.NextID, after); err != nil {
+		return nil, err
+	}
+	ev := &Event{
+		EventID:    NewEventID(),
+		Timestamp:  tx.now,
+		Actor:      tx.actor,
+		Type:       EvNodeCreated,
+		NodeID:     tx.state.NextID,
+		ParentID:   parent,
+		Kind:       KindTask,
+		Intent:     intent,
+		Acceptance: acceptance,
+		After:      append([]int64(nil), after...),
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// CreateRule appends a rule node under a goal or task parent. Rules under
+// rules are rejected because no descendant task would inherit them.
+func (tx *Tx) CreateRule(parent int64, text string) (*Event, error) {
+	if parent == 0 {
+		return nil, herr(ExitUsage, "rule requires --parent")
+	}
+	if text == "" {
+		return nil, herr(ExitUsage, "rule requires text")
+	}
+	p, ok := tx.state.Nodes[parent]
+	if !ok {
+		return nil, herr(ExitNotFound, "parent #%d not found", parent)
+	}
+	if p.Terminal() {
+		return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
+	}
+	if !p.CanParentWork() {
+		return nil, herr(ExitInvariantBroken,
+			"rule parent must be a goal/task; #%d is %s", parent, p.Kind)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeCreated,
+		NodeID:    tx.state.NextID,
+		ParentID:  parent,
+		Kind:      KindRule,
+		RuleText:  text,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+type ReviseSpec struct {
+	ParentSet  bool
+	Parent     int64
+	Intent     string
+	RuleText   string
+	Acceptance *Acceptance
+	AfterSet   bool
+	After      []int64
+	Reason     string
+}
+
+func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "node #%d not found", id)
+	}
+	if n.Terminal() {
+		return nil, herr(ExitInvariantBroken, "node #%d already terminal", id)
+	}
+	if n.Claim != nil {
+		return nil, herr(ExitClaimConflict, "node #%d is claimed by %s; release before revise", id, n.Claim.Actor)
+	}
+	if spec.ParentSet {
+		if spec.Parent == 0 {
+			return nil, herr(ExitUsage, "revise --parent requires a non-zero parent id")
+		}
+		if spec.Parent == n.ParentID {
+			spec.ParentSet = false
+		} else {
+			if n.ParentID == 0 {
+				return nil, herr(ExitInvariantBroken, "root goal #%d cannot be moved", id)
+			}
+			p, ok := tx.state.Nodes[spec.Parent]
+			if !ok {
+				return nil, herr(ExitNotFound, "parent #%d not found", spec.Parent)
+			}
+			if p.Terminal() {
+				return nil, herr(ExitInvariantBroken, "parent #%d is terminal", spec.Parent)
+			}
+			if !p.CanParentWork() {
+				return nil, herr(ExitInvariantBroken, "parent #%d is %s, not a goal/task", spec.Parent, p.Kind)
+			}
+			if n.Kind == KindGoal && p.Kind != KindGoal {
+				return nil, herr(ExitInvariantBroken, "goal #%d parent must be a goal; #%d is %s", id, spec.Parent, p.Kind)
+			}
+			if tx.state.isAncestor(id, spec.Parent) {
+				return nil, herr(ExitInvariantBroken, "moving #%d under #%d would create a cycle", id, spec.Parent)
+			}
+		}
+	}
+	if !spec.ParentSet && spec.Intent == "" && spec.RuleText == "" && spec.Acceptance == nil && !spec.AfterSet {
+		return nil, herr(ExitUsage, "revise requires at least one of --parent, --intent, --rule, --verify, --review, --after")
+	}
+	if spec.Intent != "" && n.Kind == KindRule {
+		return nil, herr(ExitInvariantBroken, "rule #%d uses --rule, not --intent", id)
+	}
+	if spec.RuleText != "" && n.Kind != KindRule {
+		return nil, herr(ExitInvariantBroken, "%s #%d uses --intent, not --rule", n.Kind, id)
+	}
+	if spec.Acceptance != nil && n.Kind != KindTask {
+		return nil, herr(ExitInvariantBroken, "%s #%d cannot have acceptance", n.Kind, id)
+	}
+	if spec.AfterSet && n.Kind != KindTask {
+		return nil, herr(ExitInvariantBroken, "%s #%d cannot have prerequisites", n.Kind, id)
+	}
+	if spec.AfterSet {
+		if err := tx.validateAfter(id, spec.After); err != nil {
+			return nil, err
+		}
+	}
+	parentID := int64(0)
+	if spec.ParentSet {
+		parentID = spec.Parent
+	}
+	ev := &Event{
+		EventID:    NewEventID(),
+		Timestamp:  tx.now,
+		Actor:      tx.actor,
+		Type:       EvNodeRevised,
+		NodeID:     id,
+		ParentID:   parentID,
+		Intent:     spec.Intent,
+		RuleText:   spec.RuleText,
+		Acceptance: spec.Acceptance,
+		Reason:     spec.Reason,
+	}
+	if spec.AfterSet {
+		ev.After = append([]int64(nil), spec.After...)
+		ev.AfterSet = true
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// TakeClaim atomically acquires a claim on the target task or fails.
+func (tx *Tx) TakeClaim(id int64) (*Event, error) {
+	n, err := tx.requireOpenTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if n.Claim != nil {
+		return nil, herr(ExitClaimConflict, "task #%d already claimed by %s", id, n.Claim.Actor)
+	}
+	if !tx.state.IsReadyTask(id) {
+		return nil, herr(ExitInvariantBroken, "%s", tx.state.ReadyBlockReason(id))
+	}
+	exp := tx.now.Add(tx.cfg.ClaimLeaseTTL)
+	ev := &Event{
+		EventID:        NewEventID(),
+		Timestamp:      tx.now,
+		Actor:          tx.actor,
+		Type:           EvClaimTaken,
+		AttemptID:      NewAttemptID(),
+		NodeID:         id,
+		LeaseID:        NewLeaseID(),
+		LeaseExpiresAt: &exp,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) HoldNode(id int64, kind string, reason string) (*Event, error) {
+	if reason == "" {
+		return nil, herr(ExitUsage, "hold requires --reason")
+	}
+	if kind != HoldBlocked && kind != HoldWaiting && kind != HoldDeferred {
+		return nil, herr(ExitUsage, "hold --kind must be blocked, waiting, or deferred")
+	}
+	n, err := tx.requireOpenTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if n.Claim != nil {
+		return nil, herr(ExitInvariantBroken, "task #%d is claimed; release before hold", id)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeHeld,
+		NodeID:    id,
+		HoldKind:  kind,
+		Reason:    reason,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) ClearHold(id int64) (*Event, error) {
+	n, err := tx.requireOpenTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if n.Hold == nil {
+		return nil, herr(ExitInvariantBroken, "task #%d is not held", id)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeUnheld,
+		NodeID:    id,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// ReleaseClaim drops the caller's own claim on a task. Releasing someone
+// else's claim is a conflict.
+func (tx *Tx) ReleaseClaim(id int64) (*Event, error) {
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "task #%d not found", id)
+	}
+	if n.Claim == nil {
+		return nil, herr(ExitInvariantBroken, "task #%d is not claimed", id)
+	}
+	if n.Claim.Actor != tx.actor {
+		return nil, herr(ExitClaimConflict, "task #%d held by %s, not %s", id, n.Claim.Actor, tx.actor)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvClaimReleased,
+		AttemptID: n.Claim.AttemptID,
+		NodeID:    id,
+		LeaseID:   n.Claim.LeaseID,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// RecordScriptRun appends a script_run event regardless of trigger. The
+// caller should have already executed the shell command.
+func (tx *Tx) RecordScriptRun(id int64, res RunResult) (*Event, error) {
+	if _, ok := tx.state.Nodes[id]; !ok {
+		return nil, herr(ExitNotFound, "task #%d not found", id)
+	}
+	ev := &Event{
+		EventID:    NewEventID(),
+		Timestamp:  tx.now,
+		Actor:      tx.actor,
+		Type:       EvScriptRun,
+		AttemptID:  tx.attemptIDForActorClaim(id),
+		NodeID:     id,
+		Trigger:    res.Trigger,
+		CheckName:  res.CheckName,
+		Cmd:        res.Cmd,
+		ExitCode:   res.ExitCode,
+		DurationMs: res.DurationMs,
+		StdoutHead: res.StdoutHead,
+		StderrHead: res.StderrHead,
+		Truncated:  res.Truncated,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) RecordEvidence(id int64, kind string, summary string, data json.RawMessage) (*Event, error) {
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "node #%d not found", id)
+	}
+	if !n.CanHaveEvidence() {
+		return nil, herr(ExitInvariantBroken, "node #%d cannot carry evidence", id)
+	}
+	if kind == "" {
+		return nil, herr(ExitUsage, "evidence requires --kind")
+	}
+	if summary == "" {
+		return nil, herr(ExitUsage, "evidence requires --summary")
+	}
+	ev := &Event{
+		EventID:         NewEventID(),
+		Timestamp:       tx.now,
+		Actor:           tx.actor,
+		Type:            EvEvidence,
+		AttemptID:       tx.attemptIDForActorClaim(id),
+		NodeID:          id,
+		EvidenceKind:    kind,
+		EvidenceSummary: summary,
+		EvidenceData:    append(json.RawMessage(nil), data...),
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// CompletionGuard captures the preconditions an in-flight verify acceptance locked
+// in before releasing the lock. The post-shell tx must verify these still
+// hold before completing.
+type CompletionGuard struct {
+	NodeID         int64
+	AcceptanceKind string
+	VerifyChecks   []VerifyCheck
+	ClaimLeaseID   string // must still match this lease for completion
+	ClaimAttemptID string
+}
+
+// PrepareCompletionGuard validates that a task is currently completable by
+// the caller and returns a guard the caller passes to CompleteTask after any
+// out-of-lock work (such as running a verify shell command).
+func (tx *Tx) PrepareCompletionGuard(id int64) (CompletionGuard, error) {
+	n, err := tx.requireOpenTask(id)
+	if err != nil {
+		return CompletionGuard{}, err
+	}
+	if err := tx.requireCallerOwnsClaim(n); err != nil {
+		return CompletionGuard{}, err
+	}
+	if ok, why := tx.state.CanComplete(id); !ok {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "%s", why)
+	}
+	if failed := tx.state.DependencyFailedIDs(n); len(failed) > 0 {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d has canceled prerequisite(s): %v", id, failed)
+	}
+	if waiting := tx.state.WaitingOnIDs(n); len(waiting) > 0 {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d is waiting on prerequisite(s): %v", id, waiting)
+	}
+	if n.Acceptance == nil {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d has no acceptance", id)
+	}
+	g := CompletionGuard{NodeID: id, AcceptanceKind: n.Acceptance.Kind, VerifyChecks: n.Acceptance.VerifyChecks()}
+	if n.Claim != nil {
+		g.ClaimLeaseID = n.Claim.LeaseID
+		g.ClaimAttemptID = n.Claim.AttemptID
+	}
+	return g, nil
+}
+
+// CompleteTask is the only writer of task_completed. It re-validates the
+// guard's preconditions inside the current lock, so verify-acceptance completions
+// that race with cancel/release/lease-expiry are rejected.
+func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error) {
+	n, err := tx.requireOpenTask(g.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	if ok, why := tx.state.CanComplete(g.NodeID); !ok {
+		return nil, herr(ExitInvariantBroken, "%s", why)
+	}
+	if failed := tx.state.DependencyFailedIDs(n); len(failed) > 0 {
+		return nil, herr(ExitInvariantBroken, "task #%d has canceled prerequisite(s): %v", g.NodeID, failed)
+	}
+	if waiting := tx.state.WaitingOnIDs(n); len(waiting) > 0 {
+		return nil, herr(ExitInvariantBroken, "task #%d is waiting on prerequisite(s): %v", g.NodeID, waiting)
+	}
+	if n.Acceptance == nil || n.Acceptance.Kind != g.AcceptanceKind {
+		return nil, herr(ExitInvariantBroken, "task #%d acceptance changed under us", g.NodeID)
+	}
+	if g.AcceptanceKind == AcceptanceVerify && !sameVerifyChecks(n.Acceptance.VerifyChecks(), g.VerifyChecks) {
+		return nil, herr(ExitInvariantBroken, "task #%d verify checks changed under us", g.NodeID)
+	}
+	if err := tx.requireCallerOwnsClaim(n); err != nil {
+		return nil, err
+	}
+	if n.Claim != nil && g.ClaimLeaseID != "" && n.Claim.LeaseID != g.ClaimLeaseID {
+		return nil, herr(ExitClaimConflict, "task #%d claim changed under us", g.NodeID)
+	}
+	if n.Claim != nil && g.ClaimAttemptID != "" && n.Claim.AttemptID != g.ClaimAttemptID {
+		return nil, herr(ExitClaimConflict, "task #%d attempt changed under us", g.NodeID)
+	}
+	if evidenceID != "" {
+		rec, ok := tx.state.EvidenceIDs[evidenceID]
+		if !ok {
+			return nil, herr(ExitNotFound, "evidence %s not found", evidenceID)
+		}
+		if rec.NodeID != g.NodeID {
+			return nil, herr(ExitInvariantBroken, "evidence %s belongs to #%d", evidenceID, rec.NodeID)
+		}
+	}
+	if g.AcceptanceKind == AcceptanceReview && evidenceID == "" {
+		return nil, herr(ExitUsage, "review acceptance requires --evidence <event-id> or --note")
+	}
+	ev := &Event{
+		EventID:    NewEventID(),
+		Timestamp:  tx.now,
+		Actor:      tx.actor,
+		Type:       EvTaskCompleted,
+		AttemptID:  n.Claim.AttemptID,
+		NodeID:     g.NodeID,
+		EvidenceID: evidenceID,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// CancelNode terminates a task or rule. Tasks that are claimed must be
+// released or the caller must own the claim.
+func (tx *Tx) CancelNode(id int64, reason string) (*Event, error) {
+	if reason == "" {
+		return nil, herr(ExitUsage, "cancel requires --reason")
+	}
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "node #%d not found", id)
+	}
+	if n.Terminal() {
+		return nil, herr(ExitInvariantBroken, "node #%d already terminal", id)
+	}
+	if n.Kind == KindGoal {
+		return nil, herr(ExitInvariantBroken,
+			"goal #%d cannot be canceled directly; finish or cancel descendant tasks", id)
+	}
+	if child := tx.state.OpenTaskChild(n); child != nil {
+		return nil, herr(ExitInvariantBroken,
+			"node #%d has open child task #%d; finish or cancel children first", id, child.ID)
+	}
+	if n.IsTask() && n.Claim != nil && n.Claim.Actor != tx.actor {
+		return nil, herr(ExitClaimConflict, "task #%d held by %s; release or take first", id, n.Claim.Actor)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeCanceled,
+		AttemptID: tx.attemptIDForActorClaim(id),
+		NodeID:    id,
+		Reason:    reason,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) requireOpenTask(id int64) (*Node, error) {
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "task #%d not found", id)
+	}
+	if !n.IsTask() {
+		return nil, herr(ExitInvariantBroken, "#%d is a rule, not a task", id)
+	}
+	if n.Terminal() {
+		return nil, herr(ExitInvariantBroken, "task #%d already terminal", id)
+	}
+	return n, nil
+}
+
+func (tx *Tx) requireCallerOwnsClaim(n *Node) error {
+	if n.Claim == nil {
+		return herr(ExitInvariantBroken, "task #%d is not claimed; run `cst take %d` first", n.ID, n.ID)
+	}
+	if n.Claim.Actor != tx.actor {
+		return herr(ExitClaimConflict, "task #%d held by %s, not %s", n.ID, n.Claim.Actor, tx.actor)
+	}
+	return nil
+}
+
+func (tx *Tx) attemptIDForActorClaim(id int64) string {
+	n := tx.state.Nodes[id]
+	if n == nil || n.Claim == nil || n.Claim.Actor != tx.actor {
+		return ""
+	}
+	return n.Claim.AttemptID
+}
+
+func (tx *Tx) validateAfter(nodeID int64, after []int64) error {
+	seen := map[int64]bool{}
+	for _, refID := range after {
+		if refID == 0 {
+			return herr(ExitUsage, "--after requires a non-zero node id")
+		}
+		if refID == nodeID {
+			return herr(ExitInvariantBroken, "task #%d cannot depend on itself", nodeID)
+		}
+		if seen[refID] {
+			return herr(ExitInvariantBroken, "task #%d repeats prerequisite #%d", nodeID, refID)
+		}
+		seen[refID] = true
+		ref, ok := tx.state.Nodes[refID]
+		if !ok {
+			return herr(ExitNotFound, "--after references unknown node #%d", refID)
+		}
+		if !ref.CanParentWork() {
+			return herr(ExitInvariantBroken, "--after references %s #%d; prerequisites must be goals or tasks", ref.Kind, refID)
+		}
+		if tx.state.isAncestor(refID, nodeID) {
+			return herr(ExitInvariantBroken, "task #%d cannot depend on ancestor #%d", nodeID, refID)
+		}
+		if tx.state.hasPrereqPath(refID, nodeID) {
+			return herr(ExitInvariantBroken, "task #%d after #%d would create a prerequisite cycle", nodeID, refID)
+		}
+	}
+	return nil
+}
+
+// applyAndQueue both stages the event for commit and applies it to tx.state
+// so subsequent primitives in the same Tx see consistent post-event state
+// (e.g. CreateTask + TakeClaim in one Tx).
+func (tx *Tx) applyAndQueue(ev *Event) error {
+	if err := tx.state.applyOne(ev); err != nil {
+		return err
+	}
+	tx.pending = append(tx.pending, ev)
+	return nil
+}
+
+// renewClaimUnderLock is used by the long-running shell renewer outside any
+// Tx. It opens its own lock briefly, reloads state, and writes a single
+// claim_renewed event only when the active claim still matches both the
+// caller's actor AND the lease id captured at the start of the run. The
+// lease-id check prevents an old long-running renewer from extending a new
+// claim that was taken after the original lease was released.
+func renewClaimUnderLock(actor string, id int64, expectedLeaseID string, ttl time.Duration) error {
+	if expectedLeaseID == "" {
+		return errors.New("renew requires lease id")
+	}
+	lock, err := AcquireLock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	events, err := Replay()
+	if err != nil {
+		return err
+	}
+	state, err := Apply(events)
+	if err != nil {
+		return err
+	}
+	n, ok := state.Nodes[id]
+	if !ok || n.Claim == nil || n.Claim.LeaseID != expectedLeaseID || n.Claim.Actor != actor {
+		return errors.New("lease lost during renewal")
+	}
+	now := time.Now()
+	exp := now.Add(ttl)
+	ev := &Event{
+		EventID:        NewEventID(),
+		Timestamp:      now,
+		Actor:          actor,
+		Type:           EvClaimRenewed,
+		AttemptID:      n.Claim.AttemptID,
+		NodeID:         id,
+		LeaseID:        n.Claim.LeaseID,
+		LeaseExpiresAt: &exp,
+	}
+	return Append(ev)
+}
+
+// runScriptUnderTx is a thin convenience wrapper used by handlers that need
+// to run a shell command and append both the script_run event and possibly a
+// completion. Callers still drive the two-phase logic where needed.
+func runScript(cfg Config, opts RunOpts) RunResult {
+	if opts.StdoutMaxBytes <= 0 {
+		opts.StdoutMaxBytes = cfg.RunnerStdoutMaxBytes
+	}
+	if opts.StderrMaxBytes <= 0 {
+		opts.StderrMaxBytes = cfg.RunnerStderrMaxBytes
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = cfg.RunnerDefaultTimeout
+	}
+	return Run(opts)
+}
+
+func loadCfg() (Config, error) {
+	dir, err := EnsureStoreDir()
+	if err != nil {
+		return Config{}, err
+	}
+	return LoadConfig(dir)
+}
