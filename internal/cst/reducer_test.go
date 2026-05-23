@@ -1,6 +1,8 @@
 package cst
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,4 +139,75 @@ func TestApplyRejectsCorruptHistories(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifierContractEvidenceShape(t *testing.T) {
+	now := time.Now()
+	root := &Event{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+		NodeID: 1, Kind: KindGoal, Intent: "root"}
+	task := &Event{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+		NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "contract", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}}
+	valid := &Event{EventID: "evidence", Timestamp: now, Actor: "a", Type: EvEvidence,
+		NodeID: 2, EvidenceKind: EvidenceVerifierContract, EvidenceSummary: "contract", EvidenceData: validVerifierContractData()}
+	if _, err := Apply([]*Event{root, task, valid}); err != nil {
+		t.Fatalf("valid verifier_contract evidence rejected: %v", err)
+	}
+
+	invalids := []struct {
+		name string
+		data json.RawMessage
+	}{
+		{"missing data", nil},
+		{"mutable source", verifierContractDataWith(t, `"canonical_source":{"ref":"README.md"}`)},
+		{"missing artifacts", verifierContractDataWith(t, `"contract_artifacts":[]`)},
+		{"bad script hash", verifierContractDataWith(t, `"verifier_scripts":[{"path":"scripts/verify-contract-lock","sha256":"bad"}]`)},
+		{"prose red case", verifierContractDataWith(t, `"red_case_runs":[]`)},
+		{"passing red case", verifierContractDataWith(t, `"red_case_runs":[{"name":"lazy","diff_path":"testdata/lazy.diff","diff_sha256":"`+testSHA256("4")+`","command":"make red","expected_exit":0,"observed_exit":0,"stderr_path":"testdata/lazy.stderr","stderr_sha256":"`+testSHA256("5")+`"}]`)},
+	}
+	for _, tc := range invalids {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := *valid
+			ev.EventID = "bad-" + tc.name
+			ev.EvidenceData = tc.data
+			if _, err := Apply([]*Event{root, task, &ev}); err == nil {
+				t.Fatal("expected verifier_contract shape rejection")
+			}
+		})
+	}
+}
+
+func validVerifierContractData() json.RawMessage {
+	return json.RawMessage(`{
+		"canonical_source":{"ref":"git:1234567890abcdef:README.md","description":"fixture"},
+		"contract_artifacts":[{"path":".artifacts/verifier-contract.json","sha256":"` + testSHA256("1") + `"}],
+		"verifier_scripts":[{"path":"scripts/verify-contract-lock","sha256":"` + testSHA256("2") + `"},{"path":"cmd/verify-contract-lock/main.go","sha256":"` + testSHA256("6") + `"}],
+		"manifest":{"path":".artifacts/manifest.json","sha256":"` + testSHA256("3") + `","count":1},
+		"cheapest_plausible_lie":"partial output passes",
+		"red_case_runs":[{"name":"lazy","diff_path":"testdata/lazy.diff","diff_sha256":"` + testSHA256("4") + `","command":"make red","expected_exit":1,"observed_exit":1,"stderr_path":"testdata/lazy.stderr","stderr_sha256":"` + testSHA256("5") + `"}],
+		"blind_spots":[]
+	}`)
+}
+
+func verifierContractDataWith(t *testing.T, replacement string) json.RawMessage {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(validVerifierContractData(), &obj); err != nil {
+		t.Fatal(err)
+	}
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{`+replacement+`}`), &patch); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range patch {
+		obj[k] = v
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func testSHA256(seed string) string {
+	return strings.Repeat(seed, 64)
 }

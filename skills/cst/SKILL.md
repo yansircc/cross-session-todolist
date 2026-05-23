@@ -89,6 +89,41 @@ Use `--after <id>` for internal sequencing. Reserve `hold` for external pauses.
 Correct tree shape with `revise`; do not create duplicate replacement tasks when
 identity should be preserved.
 
+## Verifier Contracts
+
+For risky tasks, acceptance criteria must derive from a canonical source of
+truth that the implementation task does not edit. Do not treat a self-authored
+validator as enough unless it has a frozen source or manifest, red cases, and
+explicit blind spots.
+
+Use two tasks:
+
+```sh
+cst add --parent 2 --intent "Freeze verifier contract" --review self
+cst add --parent 2 --intent "Implement against frozen contract" --after 7 \
+  --check contract-lock="scripts/verify-contract-lock --contract .artifacts/verifier-contract.json" \
+  --check coverage="..." \
+  --check red="..." \
+  --check real="..."
+```
+
+Record the contract as evidence:
+
+```sh
+cst evidence 7 --kind verifier_contract --summary "frozen acceptance contract" --data '{"canonical_source":{"ref":"git:<sha>:<path>","description":"..."},"contract_artifacts":[{"path":"...","sha256":"..."}],"verifier_scripts":[{"path":"scripts/verify-contract-lock","sha256":"..."},{"path":"cmd/verify-contract-lock/main.go","sha256":"..."}],"manifest":{"path":"...","sha256":"...","count":0},"cheapest_plausible_lie":"...","red_case_runs":[{"name":"...","diff_path":"...","diff_sha256":"...","command":"...","expected_exit":1,"observed_exit":1,"stderr_path":"...","stderr_sha256":"..."}],"blind_spots":[{"axis":"...","reason":"...","review":"..."}]}'
+```
+
+Enumerable work must freeze a manifest first. Non-enumerable work must name an
+external source of truth or record `blind_spots`; do not claim
+machine-verified completeness for uncovered axes. `canonical_source.ref` must
+name a stable object such as `git:<sha>:<path>`, `path@<sha>`, or
+`url@<version>`. The ref is a declaration: CST and `contract-lock` validate its
+shape, not the remote object. Mechanical closure comes from the hash chain over
+contract artifacts, verifier scripts, manifests, and red-case outputs. Include
+both the lock shim and its real implementation, such as
+`cmd/verify-contract-lock/main.go`, in `verifier_scripts`. Red cases must reject
+the cheapest plausible lie with executed failure artifacts, not prose only.
+
 ## Evidence And Attempts
 
 Durable process notes are evidence:

@@ -1,0 +1,6 @@
+diff --git a/result.txt b/result.txt
+--- a/result.txt
++++ b/result.txt
+@@
+-complete
++partial

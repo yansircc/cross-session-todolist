@@ -1,0 +1,25 @@
+{
+  "canonical_source": {"ref": "git:1234567890abcdef:README.md"},
+  "contract_artifacts": [
+    {"path": "testdata/verifier-contract/lazy-stub.stderr.sha256", "sha256": "c8cb69cd69226a76047e5d85227fa3e6b54eda723a86fc3c47a899f36d9387bd"}
+  ],
+  "verifier_scripts": [
+    {"path": "scripts/verify-contract-lock", "sha256": "720c596ba7936102cc72940f5d304de0e67b89bddca4692f339315a247a49e3c"},
+    {"path": "cmd/verify-contract-lock/main.go", "sha256": "05753af9237ae52435448ceb97c879e93ef03beac430ae368f3d4ef06b1e1b8d"}
+  ],
+  "manifest": {"path": "testdata/verifier-contract/pass-manifest.json", "sha256": "2469f4559b70b142622604400a6c98ec9ba98c0ece47da5a8ff6f58819f8a880", "count": 10},
+  "cheapest_plausible_lie": "emit one manifest row and mark the output complete",
+  "red_case_runs": [
+    {
+      "name": "lazy-stub",
+      "diff_path": "testdata/verifier-contract/lazy-stub.diff",
+      "diff_sha256": "ca6cd90db8ff9d2ee00cb4d43ce01dd931ceaaa1af8fa045a5d9db29f32cb5c9",
+      "command": "make verify-coverage",
+      "expected_exit": 1,
+      "observed_exit": 1,
+      "stderr_path": "testdata/verifier-contract/lazy-stub.stderr",
+      "stderr_sha256": "dc23162689779c6c921cce7c42b7d197b4d9fcbcef0b383cb3fda1aa106248fa"
+    }
+  ],
+  "blind_spots": []
+}

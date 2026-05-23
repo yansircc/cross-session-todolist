@@ -1,0 +1,25 @@
+{
+  "canonical_source": {"ref": "git:1234567890abcdef:README.md"},
+  "contract_artifacts": [
+    {"path": "testdata/verifier-contract/pass-artifact.txt", "sha256": "8b0058d45f4aa7e2800d3869d3bfbff62dfe04b0252d7f1b1326705d32e7e074"}
+  ],
+  "verifier_scripts": [
+    {"path": "scripts/verify-contract-lock", "sha256": "720c596ba7936102cc72940f5d304de0e67b89bddca4692f339315a247a49e3c"},
+    {"path": "cmd/verify-contract-lock/main.go", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "manifest": {"path": "testdata/verifier-contract/pass-manifest.json", "sha256": "2469f4559b70b142622604400a6c98ec9ba98c0ece47da5a8ff6f58819f8a880", "count": 1},
+  "cheapest_plausible_lie": "partial output passes",
+  "red_case_runs": [
+    {
+      "name": "partial",
+      "diff_path": "testdata/verifier-contract/pass-red.diff",
+      "diff_sha256": "73e66267457c3c41c98c70e4e7cbf75a484faa11876400bb8173ac41b8bcbd7a",
+      "command": "make verify-red-cases",
+      "expected_exit": 1,
+      "observed_exit": 1,
+      "stderr_path": "testdata/verifier-contract/pass-red.stderr",
+      "stderr_sha256": "37f02e7da786cf7af68313ad2d4b9e3ff1b0269595c15c6b76e4dc34cce819cd"
+    }
+  ],
+  "blind_spots": []
+}

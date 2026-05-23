@@ -88,6 +88,16 @@ Acceptance and readiness:
   --check <n=cmd>  named verify check; repeatable; done runs all checks in order.
   --review <who>   done requires --note or --evidence.
   --after <id>     task is not ready until each prerequisite node is completed.
+  Risky work should freeze a verifier contract before implementation: create a
+  review task that records evidence kind=verifier_contract with
+  canonical_source.ref, contract_artifacts, verifier_scripts, manifest,
+  cheapest_plausible_lie, red_case_runs, and blind_spots; then make the
+  implementation task depend on it with --after and named checks such as
+  contract-lock, coverage, red, and real. contract-lock must rehash the frozen
+  artifacts/scripts outside the reducer; include the shim and real implementation
+  such as cmd/verify-contract-lock/main.go. canonical_source.ref is a
+  declaration; closure comes from the hash chain. CST records shape, not
+  verifier truth.
 
 Evidence and scripts:
   cst run records script_run(trigger=probe) and does not change status.

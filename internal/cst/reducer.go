@@ -378,6 +378,11 @@ func (s *State) applyOne(e *Event) error {
 		if e.EvidenceSummary == "" {
 			return fmt.Errorf("evidence_recorded #%d missing summary", e.NodeID)
 		}
+		if e.EvidenceKind == EvidenceVerifierContract {
+			if err := validateVerifierContractEvidence(e.EvidenceData); err != nil {
+				return err
+			}
+		}
 		if n.Claim != nil && n.Claim.Actor == e.Actor && n.Claim.AttemptID != "" && e.AttemptID == "" {
 			return fmt.Errorf("evidence_recorded on #%d missing attempt_id", e.NodeID)
 		}

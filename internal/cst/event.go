@@ -45,13 +45,14 @@ const (
 )
 
 const (
-	EvidenceNote   = "note"
-	EvidenceCommit = "commit"
-	EvidenceFile   = "file"
-	EvidenceURL    = "url"
-	EvidenceRunID  = "run_id"
-	EvidenceTest   = "test"
-	EvidenceScript = "script_run"
+	EvidenceNote             = "note"
+	EvidenceCommit           = "commit"
+	EvidenceFile             = "file"
+	EvidenceURL              = "url"
+	EvidenceRunID            = "run_id"
+	EvidenceTest             = "test"
+	EvidenceScript           = "script_run"
+	EvidenceVerifierContract = "verifier_contract"
 )
 
 type Acceptance struct {

@@ -210,6 +210,61 @@ completed. It does not prove completion; it only controls readiness.
 cst add --parent 1 --intent "Publish" --after 7 --review self
 ```
 
+## Verifier Contracts
+
+For risky tasks, the verifier criteria must come from a canonical source of
+truth that the implementation task does not edit. A passing validator is not
+completion if it only proves the cheapest partial implementation.
+
+Model that as two tasks:
+
+```sh
+cst add --parent 2 --intent "Freeze verifier contract" --review self
+cst add --parent 2 --intent "Implement against frozen contract" --after 7 \
+  --check contract-lock="scripts/verify-contract-lock --contract .artifacts/verifier-contract.json" \
+  --check coverage="make verify-coverage" \
+  --check red="make verify-red-cases" \
+  --check real="make verify"
+```
+
+Record the frozen contract as evidence on the contract task:
+
+```sh
+cst evidence 7 --kind verifier_contract --summary "frozen acceptance contract" --data '{
+  "canonical_source": {"ref": "git:<sha>:<path>", "description": "..."},
+  "contract_artifacts": [{"path": "...", "sha256": "..."}],
+  "verifier_scripts": [
+    {"path": "scripts/verify-contract-lock", "sha256": "..."},
+    {"path": "cmd/verify-contract-lock/main.go", "sha256": "..."}
+  ],
+  "manifest": {"path": "...", "sha256": "...", "count": 0},
+  "cheapest_plausible_lie": "...",
+  "red_case_runs": [{
+    "name": "...",
+    "diff_path": "...",
+    "diff_sha256": "...",
+    "command": "...",
+    "expected_exit": 1,
+    "observed_exit": 1,
+    "stderr_path": "...",
+    "stderr_sha256": "..."
+  }],
+  "blind_spots": [{"axis": "...", "reason": "...", "review": "..."}]
+}'
+```
+
+If the task is enumerable, freeze a manifest first so partial output fails by
+diff or row coverage. If it is not enumerable, derive the verifier from an
+external source of truth. If no such source exists, record the axis under
+`blind_spots` and do not claim machine-verified completeness. `canonical_source.ref`
+must name a stable object such as `git:<sha>:<path>`, `path@<sha>`, or
+`url@<version>`. The ref is a declaration: CST and `contract-lock` validate its
+shape, not the remote object. Mechanical closure comes from the hash chain over
+contract artifacts, verifier scripts, manifests, and red-case outputs.
+`contract-lock` must rehash that chain; CST does not do that semantic check in
+the reducer. Red cases must reject the cheapest plausible lie with executed
+failure artifacts, not prose only.
+
 ## Evidence
 
 Evidence is an event ledger, not a mutable field.
