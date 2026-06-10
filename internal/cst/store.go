@@ -26,6 +26,8 @@ type StorePaths struct {
 
 var storeRootMu sync.RWMutex
 var configuredStoreRoot string
+var actorMu sync.RWMutex
+var configuredActor string
 
 func SetStoreRoot(root string) error {
 	if root == "" {
@@ -42,6 +44,12 @@ func SetStoreRoot(root string) error {
 	configuredStoreRoot = paths.Root
 	storeRootMu.Unlock()
 	return nil
+}
+
+func SetActor(actor string) {
+	actorMu.Lock()
+	configuredActor = actor
+	actorMu.Unlock()
 }
 
 func ResolveStorePaths(root string) (StorePaths, error) {
@@ -247,17 +255,33 @@ func NewAttemptID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func ResolveActor(cfgDefault string) string {
+type ActorIdentity struct {
+	Name     string
+	Explicit bool
+	Source   string
+}
+
+func ResolveActorIdentity(cfgDefault string) ActorIdentity {
+	actorMu.RLock()
+	override := configuredActor
+	actorMu.RUnlock()
+	if override != "" {
+		return ActorIdentity{Name: override, Explicit: true, Source: "flag"}
+	}
 	if v := os.Getenv("CST_ACTOR"); v != "" {
-		return v
+		return ActorIdentity{Name: v, Explicit: true, Source: "env"}
 	}
 	if cfgDefault != "" {
-		return cfgDefault
+		return ActorIdentity{Name: cfgDefault, Explicit: true, Source: "config"}
 	}
 	u, err := user.Current()
 	host, _ := os.Hostname()
 	if err == nil && u != nil {
-		return u.Username + "@" + host
+		return ActorIdentity{Name: u.Username + "@" + host, Explicit: false, Source: "fallback"}
 	}
-	return "unknown@" + host
+	return ActorIdentity{Name: "unknown@" + host, Explicit: false, Source: "fallback"}
+}
+
+func ResolveActor(cfgDefault string) string {
+	return ResolveActorIdentity(cfgDefault).Name
 }

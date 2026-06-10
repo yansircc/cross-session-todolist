@@ -11,12 +11,13 @@ import (
 // when the transaction closes successfully. Mutation primitives append into
 // the queue; nothing reaches disk until WithStore commits.
 type Tx struct {
-	cfg     Config
-	state   *State
-	actor   string
-	now     time.Time
-	paths   StorePaths
-	pending []*Event
+	cfg           Config
+	state         *State
+	actor         string
+	actorIdentity ActorIdentity
+	now           time.Time
+	paths         StorePaths
+	pending       []*Event
 }
 
 type TxOpts struct {
@@ -55,7 +56,8 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 	if err != nil {
 		return err
 	}
-	actor := ResolveActor(cfg.ActorDefault)
+	actorIdentity := ResolveActorIdentity(cfg.ActorDefault)
+	actor := actorIdentity.Name
 	now := time.Now()
 
 	if opts.RepairLease {
@@ -71,7 +73,7 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 		}
 	}
 
-	tx := &Tx{cfg: cfg, state: state, actor: actor, now: now, paths: paths}
+	tx := &Tx{cfg: cfg, state: state, actor: actor, actorIdentity: actorIdentity, now: now, paths: paths}
 	if err := fn(tx); err != nil {
 		return err
 	}
@@ -89,6 +91,8 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 func (tx *Tx) Snapshot() *State       { return tx.state }
 func (tx *Tx) Cfg() Config            { return tx.cfg }
 func (tx *Tx) Actor() string          { return tx.actor }
+func (tx *Tx) ActorExplicit() bool    { return tx.actorIdentity.Explicit }
+func (tx *Tx) ActorSource() string    { return tx.actorIdentity.Source }
 func (tx *Tx) StorePaths() StorePaths { return tx.paths }
 func (tx *Tx) StoreID() string        { return tx.state.StoreID() }
 
@@ -135,7 +139,7 @@ func (tx *Tx) CreateGoal(parent int64, intent string) (*Event, error) {
 // CreateTask appends a node_created event for an executable task. Tasks must
 // live under a goal or another task and must declare acceptance. Readiness
 // prerequisites are independent `after` edges.
-func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, after []int64) (*Event, error) {
+func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, after []int64, envelope *ExecutionEnvelope) (*Event, error) {
 	if intent == "" {
 		return nil, herr(ExitUsage, "task requires --intent")
 	}
@@ -158,6 +162,10 @@ func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, af
 	if err := tx.validateAfter(tx.state.NextID, after); err != nil {
 		return nil, err
 	}
+	env, err := normalizeExecutionEnvelope(envelope)
+	if err != nil {
+		return nil, herr(ExitUsage, "%s", err.Error())
+	}
 	ev := &Event{
 		EventID:    NewEventID(),
 		Timestamp:  tx.now,
@@ -168,6 +176,7 @@ func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, af
 		Kind:       KindTask,
 		Intent:     intent,
 		Acceptance: acceptance,
+		Envelope:   env,
 		After:      append([]int64(nil), after...),
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
@@ -213,14 +222,16 @@ func (tx *Tx) CreateRule(parent int64, text string) (*Event, error) {
 }
 
 type ReviseSpec struct {
-	ParentSet  bool
-	Parent     int64
-	Intent     string
-	RuleText   string
-	Acceptance *Acceptance
-	AfterSet   bool
-	After      []int64
-	Reason     string
+	ParentSet     bool
+	Parent        int64
+	Intent        string
+	RuleText      string
+	Acceptance    *Acceptance
+	EnvelopeSet   bool
+	EnvelopePatch ExecutionEnvelopePatch
+	AfterSet      bool
+	After         []int64
+	Reason        string
 }
 
 func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
@@ -262,8 +273,8 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 			}
 		}
 	}
-	if !spec.ParentSet && spec.Intent == "" && spec.RuleText == "" && spec.Acceptance == nil && !spec.AfterSet {
-		return nil, herr(ExitUsage, "revise requires at least one of --parent, --intent, --rule, --verify, --review, --after")
+	if !spec.ParentSet && spec.Intent == "" && spec.RuleText == "" && spec.Acceptance == nil && !spec.EnvelopeSet && !spec.AfterSet {
+		return nil, herr(ExitUsage, "revise requires at least one of --parent, --intent, --rule, --verify, --review, --exec-cwd, --scope, --after")
 	}
 	if spec.Intent != "" && n.Kind == KindRule {
 		return nil, herr(ExitInvariantBroken, "rule #%d uses --rule, not --intent", id)
@@ -277,9 +288,20 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 	if spec.AfterSet && n.Kind != KindTask {
 		return nil, herr(ExitInvariantBroken, "%s #%d cannot have prerequisites", n.Kind, id)
 	}
+	if spec.EnvelopeSet && n.Kind != KindTask {
+		return nil, herr(ExitInvariantBroken, "%s #%d cannot have execution envelope", n.Kind, id)
+	}
 	if spec.AfterSet {
 		if err := tx.validateAfter(id, spec.After); err != nil {
 			return nil, err
+		}
+	}
+	var env *ExecutionEnvelope
+	if spec.EnvelopeSet {
+		var err error
+		env, err = mergeExecutionEnvelopePatch(n.Envelope, spec.EnvelopePatch)
+		if err != nil {
+			return nil, herr(ExitUsage, "%s", err.Error())
 		}
 	}
 	parentID := int64(0)
@@ -296,6 +318,7 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 		Intent:     spec.Intent,
 		RuleText:   spec.RuleText,
 		Acceptance: spec.Acceptance,
+		Envelope:   env,
 		Reason:     spec.Reason,
 	}
 	if spec.AfterSet {
@@ -427,35 +450,46 @@ func (tx *Tx) RecordScriptRun(id int64, res RunResult) (*Event, error) {
 	}
 	gitAvailable := res.GitAvailable
 	ev := &Event{
-		EventID:                 eventID,
-		Timestamp:               tx.now,
-		Actor:                   tx.actor,
-		Type:                    EvScriptRun,
-		AttemptID:               tx.attemptIDForActorClaim(id),
-		NodeID:                  id,
-		Trigger:                 res.Trigger,
-		CheckName:               res.CheckName,
-		Cmd:                     res.Cmd,
-		ExitCode:                res.ExitCode,
-		DurationMs:              res.DurationMs,
-		StdoutHead:              res.StdoutHead,
-		StderrHead:              res.StderrHead,
-		Truncated:               res.Truncated,
-		StoreID:                 res.StoreID,
-		ExecCWD:                 res.ExecCWD,
-		GitAvailable:            &gitAvailable,
-		GitRoot:                 res.GitRoot,
-		GitHead:                 res.GitHead,
-		GitBranch:               res.GitBranch,
-		GitStatusShort:          res.GitStatusShort,
-		StagedDiffSHA256:        res.StagedDiffSHA256,
-		UnstagedDiffSHA256:      res.UnstagedDiffSHA256,
-		UntrackedManifestSHA256: res.UntrackedManifestSHA256,
-		GitIdentityDigest:       res.GitIdentityDigest,
-		ParallelWorktree:        res.ParallelWorktree,
-		ExecContextDigest:       res.ExecContextDigest,
-		StdoutArtifact:          res.StdoutArtifact,
-		StderrArtifact:          res.StderrArtifact,
+		EventID:                       eventID,
+		Timestamp:                     tx.now,
+		Actor:                         tx.actor,
+		Type:                          EvScriptRun,
+		AttemptID:                     tx.attemptIDForActorClaim(id),
+		NodeID:                        id,
+		Trigger:                       res.Trigger,
+		CheckName:                     res.CheckName,
+		Cmd:                           res.Cmd,
+		ExitCode:                      res.ExitCode,
+		DurationMs:                    res.DurationMs,
+		StdoutHead:                    res.StdoutHead,
+		StderrHead:                    res.StderrHead,
+		Truncated:                     res.Truncated,
+		StoreID:                       res.StoreID,
+		ExecCWD:                       res.ExecCWD,
+		GitAvailable:                  &gitAvailable,
+		GitRoot:                       res.GitRoot,
+		GitHead:                       res.GitHead,
+		GitBranch:                     res.GitBranch,
+		GitStatusShort:                res.GitStatusShort,
+		StagedDiffSHA256:              res.StagedDiffSHA256,
+		UnstagedDiffSHA256:            res.UnstagedDiffSHA256,
+		UntrackedManifestSHA256:       res.UntrackedManifestSHA256,
+		GitIdentityDigest:             res.GitIdentityDigest,
+		ExecSurface:                   res.ExecSurface,
+		OwnedPaths:                    append([]string(nil), res.OwnedPaths...),
+		ScopedGitStatusShort:          res.ScopedGitStatusShort,
+		ScopedStagedDiffSHA256:        res.ScopedStagedDiffSHA256,
+		ScopedUnstagedDiffSHA256:      res.ScopedUnstagedDiffSHA256,
+		ScopedUntrackedManifestSHA256: res.ScopedUntrackedManifestSHA256,
+		ScopedDigest:                  res.ScopedDigest,
+		OutOfScopeGitStatusShort:      res.OutOfScopeGitStatusShort,
+		OutOfScopeDeltaCount:          res.OutOfScopeDeltaCount,
+		OutOfScopeDigest:              res.OutOfScopeDigest,
+		WholeRepoDigest:               res.WholeRepoDigest,
+		ParallelWorktree:              res.ParallelWorktree,
+		ExecContextDigest:             res.ExecContextDigest,
+		StdoutArtifact:                res.StdoutArtifact,
+		StderrArtifact:                res.StderrArtifact,
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
 		return nil, err
@@ -542,6 +576,49 @@ func (tx *Tx) PrepareCompletionGuard(id int64) (CompletionGuard, error) {
 		g.ClaimAttemptID = n.Claim.AttemptID
 	}
 	return g, nil
+}
+
+func (tx *Tx) RenewExecutionClaim(id int64) (*Event, error) {
+	n, err := tx.requireOpenTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if n.Claim == nil {
+		return nil, herr(ExitInvariantBroken, "task #%d is not claimed; run `cst take %d` first", id, id)
+	}
+	stale := tx.now.After(n.Claim.LeaseExpiresAt)
+	if n.Claim.Actor != tx.actor {
+		state := "active"
+		if stale {
+			state = "expired"
+		}
+		return nil, herr(ExitClaimConflict,
+			"task #%d has %s claim by %s; inspect with `cst claims` and use `cst take %d` only when takeover is intentional",
+			id, state, n.Claim.Actor, id)
+	}
+	if !tx.actorIdentity.Explicit {
+		if stale {
+			return nil, herr(ExitClaimConflict,
+				"task #%d claim for fallback actor %s is expired; rerun with --actor, CST_ACTOR, or actor.default, then take explicitly",
+				id, tx.actor)
+		}
+		return nil, nil
+	}
+	exp := tx.now.Add(tx.cfg.ClaimLeaseTTL)
+	ev := &Event{
+		EventID:        NewEventID(),
+		Timestamp:      tx.now,
+		Actor:          tx.actor,
+		Type:           EvClaimRenewed,
+		AttemptID:      n.Claim.AttemptID,
+		NodeID:         id,
+		LeaseID:        n.Claim.LeaseID,
+		LeaseExpiresAt: &exp,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
 }
 
 // CompleteTask is the only writer of task_completed. It re-validates the

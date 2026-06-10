@@ -30,34 +30,45 @@ type Claim struct {
 }
 
 type ScriptRunRecord struct {
-	EventID                 string       `json:"event_id"`
-	NodeID                  int64        `json:"node_id"`
-	AttemptID               string       `json:"attempt_id,omitempty"`
-	Trigger                 string       `json:"trigger"`
-	CheckName               string       `json:"check_name,omitempty"`
-	Cmd                     string       `json:"cmd"`
-	ExitCode                int          `json:"exit_code"`
-	DurationMs              int64        `json:"duration_ms"`
-	StdoutHead              string       `json:"stdout_head,omitempty"`
-	StderrHead              string       `json:"stderr_head,omitempty"`
-	Truncated               bool         `json:"truncated,omitempty"`
-	StoreID                 string       `json:"store_id,omitempty"`
-	ExecCWD                 string       `json:"exec_cwd,omitempty"`
-	GitAvailable            bool         `json:"git_available,omitempty"`
-	GitRoot                 string       `json:"git_root,omitempty"`
-	GitHead                 string       `json:"git_head,omitempty"`
-	GitBranch               string       `json:"git_branch,omitempty"`
-	GitStatusShort          string       `json:"git_status_short,omitempty"`
-	StagedDiffSHA256        string       `json:"staged_diff_sha256,omitempty"`
-	UnstagedDiffSHA256      string       `json:"unstaged_diff_sha256,omitempty"`
-	UntrackedManifestSHA256 string       `json:"untracked_manifest_sha256,omitempty"`
-	GitIdentityDigest       string       `json:"git_identity_digest,omitempty"`
-	ParallelWorktree        string       `json:"parallel_worktree,omitempty"`
-	ExecContextDigest       string       `json:"exec_context_digest,omitempty"`
-	StdoutArtifact          *ArtifactRef `json:"stdout_artifact,omitempty"`
-	StderrArtifact          *ArtifactRef `json:"stderr_artifact,omitempty"`
-	Actor                   string       `json:"actor"`
-	At                      time.Time    `json:"at"`
+	EventID                       string       `json:"event_id"`
+	NodeID                        int64        `json:"node_id"`
+	AttemptID                     string       `json:"attempt_id,omitempty"`
+	Trigger                       string       `json:"trigger"`
+	CheckName                     string       `json:"check_name,omitempty"`
+	Cmd                           string       `json:"cmd"`
+	ExitCode                      int          `json:"exit_code"`
+	DurationMs                    int64        `json:"duration_ms"`
+	StdoutHead                    string       `json:"stdout_head,omitempty"`
+	StderrHead                    string       `json:"stderr_head,omitempty"`
+	Truncated                     bool         `json:"truncated,omitempty"`
+	StoreID                       string       `json:"store_id,omitempty"`
+	ExecCWD                       string       `json:"exec_cwd,omitempty"`
+	GitAvailable                  bool         `json:"git_available,omitempty"`
+	GitRoot                       string       `json:"git_root,omitempty"`
+	GitHead                       string       `json:"git_head,omitempty"`
+	GitBranch                     string       `json:"git_branch,omitempty"`
+	GitStatusShort                string       `json:"git_status_short,omitempty"`
+	StagedDiffSHA256              string       `json:"staged_diff_sha256,omitempty"`
+	UnstagedDiffSHA256            string       `json:"unstaged_diff_sha256,omitempty"`
+	UntrackedManifestSHA256       string       `json:"untracked_manifest_sha256,omitempty"`
+	GitIdentityDigest             string       `json:"git_identity_digest,omitempty"`
+	ExecSurface                   string       `json:"exec_surface,omitempty"`
+	OwnedPaths                    []string     `json:"owned_paths,omitempty"`
+	ScopedGitStatusShort          string       `json:"scoped_git_status_short,omitempty"`
+	ScopedStagedDiffSHA256        string       `json:"scoped_staged_diff_sha256,omitempty"`
+	ScopedUnstagedDiffSHA256      string       `json:"scoped_unstaged_diff_sha256,omitempty"`
+	ScopedUntrackedManifestSHA256 string       `json:"scoped_untracked_manifest_sha256,omitempty"`
+	ScopedDigest                  string       `json:"scoped_digest,omitempty"`
+	OutOfScopeGitStatusShort      string       `json:"out_of_scope_git_status_short,omitempty"`
+	OutOfScopeDeltaCount          int          `json:"out_of_scope_delta_count,omitempty"`
+	OutOfScopeDigest              string       `json:"out_of_scope_digest,omitempty"`
+	WholeRepoDigest               string       `json:"whole_repo_digest,omitempty"`
+	ParallelWorktree              string       `json:"parallel_worktree,omitempty"`
+	ExecContextDigest             string       `json:"exec_context_digest,omitempty"`
+	StdoutArtifact                *ArtifactRef `json:"stdout_artifact,omitempty"`
+	StderrArtifact                *ArtifactRef `json:"stderr_artifact,omitempty"`
+	Actor                         string       `json:"actor"`
+	At                            time.Time    `json:"at"`
 }
 
 type Hold struct {
@@ -90,17 +101,19 @@ type Attempt struct {
 }
 
 type Node struct {
-	ID                int64       `json:"id"`
-	ParentID          int64       `json:"parent_id,omitempty"`
-	Kind              string      `json:"kind"`
-	Intent            string      `json:"intent,omitempty"`
-	RuleText          string      `json:"rule_text,omitempty"`
-	Acceptance        *Acceptance `json:"acceptance,omitempty"`
-	After             []int64     `json:"after,omitempty"`
-	CreatedAt         time.Time   `json:"created_at"`
-	CreatedBy         string      `json:"created_by"`
-	CreatedEventID    string      `json:"created_event_id,omitempty"`
-	AcceptanceEventAt time.Time   `json:"acceptance_event_at,omitempty"`
+	ID                int64              `json:"id"`
+	ParentID          int64              `json:"parent_id,omitempty"`
+	Kind              string             `json:"kind"`
+	Intent            string             `json:"intent,omitempty"`
+	RuleText          string             `json:"rule_text,omitempty"`
+	Acceptance        *Acceptance        `json:"acceptance,omitempty"`
+	Envelope          *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	After             []int64            `json:"after,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	CreatedBy         string             `json:"created_by"`
+	CreatedEventID    string             `json:"created_event_id,omitempty"`
+	AcceptanceEventAt time.Time          `json:"acceptance_event_at,omitempty"`
+	EnvelopeEventAt   time.Time          `json:"envelope_event_at,omitempty"`
 
 	Children []int64 `json:"children,omitempty"`
 

@@ -117,6 +117,7 @@ func (s *State) applyOne(e *Event) error {
 			Intent:         e.Intent,
 			RuleText:       e.RuleText,
 			Acceptance:     e.Acceptance,
+			Envelope:       cloneExecutionEnvelope(e.Envelope),
 			After:          append([]int64(nil), e.After...),
 			CreatedAt:      e.Timestamp,
 			CreatedBy:      e.Actor,
@@ -125,6 +126,17 @@ func (s *State) applyOne(e *Event) error {
 		}
 		if e.Kind == KindTask && e.Acceptance != nil {
 			n.AcceptanceEventAt = e.Timestamp
+		}
+		if e.Envelope != nil {
+			env, err := normalizeExecutionEnvelope(e.Envelope)
+			if err != nil {
+				return fmt.Errorf("node_created #%d invalid execution_envelope: %w", e.NodeID, err)
+			}
+			if e.Kind != KindTask {
+				return fmt.Errorf("node_created #%d non-task cannot have execution_envelope", e.NodeID)
+			}
+			n.Envelope = env
+			n.EnvelopeEventAt = e.Timestamp
 		}
 		s.Nodes[n.ID] = n
 		s.Order = append(s.Order, n.ID)
@@ -140,7 +152,7 @@ func (s *State) applyOne(e *Event) error {
 		if !ok {
 			return fmt.Errorf("node_revised targets missing node #%d", e.NodeID)
 		}
-		if e.ParentID == 0 && e.Intent == "" && e.RuleText == "" && e.Acceptance == nil && !e.AfterSet {
+		if e.ParentID == 0 && e.Intent == "" && e.RuleText == "" && e.Acceptance == nil && e.Envelope == nil && !e.AfterSet {
 			return fmt.Errorf("node_revised #%d has no changes", e.NodeID)
 		}
 		if n.Terminal() {
@@ -178,6 +190,17 @@ func (s *State) applyOne(e *Event) error {
 			}
 			n.Acceptance = e.Acceptance
 			n.AcceptanceEventAt = e.Timestamp
+		}
+		if e.Envelope != nil {
+			if n.Kind != KindTask {
+				return fmt.Errorf("node_revised cannot set execution_envelope on %s #%d", n.Kind, e.NodeID)
+			}
+			env, err := normalizeExecutionEnvelope(e.Envelope)
+			if err != nil {
+				return fmt.Errorf("node_revised #%d invalid execution_envelope: %w", e.NodeID, err)
+			}
+			n.Envelope = env
+			n.EnvelopeEventAt = e.Timestamp
 		}
 		if e.AfterSet {
 			if n.Kind != KindTask {
@@ -347,34 +370,45 @@ func (s *State) applyOne(e *Event) error {
 			gitAvailable = *e.GitAvailable
 		}
 		n.Runs = append(n.Runs, ScriptRunRecord{
-			EventID:                 e.EventID,
-			NodeID:                  e.NodeID,
-			AttemptID:               e.AttemptID,
-			Trigger:                 e.Trigger,
-			CheckName:               e.CheckName,
-			Cmd:                     e.Cmd,
-			ExitCode:                e.ExitCode,
-			DurationMs:              e.DurationMs,
-			StdoutHead:              e.StdoutHead,
-			StderrHead:              e.StderrHead,
-			Truncated:               e.Truncated,
-			StoreID:                 e.StoreID,
-			ExecCWD:                 e.ExecCWD,
-			GitAvailable:            gitAvailable,
-			GitRoot:                 e.GitRoot,
-			GitHead:                 e.GitHead,
-			GitBranch:               e.GitBranch,
-			GitStatusShort:          e.GitStatusShort,
-			StagedDiffSHA256:        e.StagedDiffSHA256,
-			UnstagedDiffSHA256:      e.UnstagedDiffSHA256,
-			UntrackedManifestSHA256: e.UntrackedManifestSHA256,
-			GitIdentityDigest:       e.GitIdentityDigest,
-			ParallelWorktree:        e.ParallelWorktree,
-			ExecContextDigest:       e.ExecContextDigest,
-			StdoutArtifact:          e.StdoutArtifact,
-			StderrArtifact:          e.StderrArtifact,
-			Actor:                   e.Actor,
-			At:                      e.Timestamp,
+			EventID:                       e.EventID,
+			NodeID:                        e.NodeID,
+			AttemptID:                     e.AttemptID,
+			Trigger:                       e.Trigger,
+			CheckName:                     e.CheckName,
+			Cmd:                           e.Cmd,
+			ExitCode:                      e.ExitCode,
+			DurationMs:                    e.DurationMs,
+			StdoutHead:                    e.StdoutHead,
+			StderrHead:                    e.StderrHead,
+			Truncated:                     e.Truncated,
+			StoreID:                       e.StoreID,
+			ExecCWD:                       e.ExecCWD,
+			GitAvailable:                  gitAvailable,
+			GitRoot:                       e.GitRoot,
+			GitHead:                       e.GitHead,
+			GitBranch:                     e.GitBranch,
+			GitStatusShort:                e.GitStatusShort,
+			StagedDiffSHA256:              e.StagedDiffSHA256,
+			UnstagedDiffSHA256:            e.UnstagedDiffSHA256,
+			UntrackedManifestSHA256:       e.UntrackedManifestSHA256,
+			GitIdentityDigest:             e.GitIdentityDigest,
+			ExecSurface:                   e.ExecSurface,
+			OwnedPaths:                    append([]string(nil), e.OwnedPaths...),
+			ScopedGitStatusShort:          e.ScopedGitStatusShort,
+			ScopedStagedDiffSHA256:        e.ScopedStagedDiffSHA256,
+			ScopedUnstagedDiffSHA256:      e.ScopedUnstagedDiffSHA256,
+			ScopedUntrackedManifestSHA256: e.ScopedUntrackedManifestSHA256,
+			ScopedDigest:                  e.ScopedDigest,
+			OutOfScopeGitStatusShort:      e.OutOfScopeGitStatusShort,
+			OutOfScopeDeltaCount:          e.OutOfScopeDeltaCount,
+			OutOfScopeDigest:              e.OutOfScopeDigest,
+			WholeRepoDigest:               e.WholeRepoDigest,
+			ParallelWorktree:              e.ParallelWorktree,
+			ExecContextDigest:             e.ExecContextDigest,
+			StdoutArtifact:                e.StdoutArtifact,
+			StderrArtifact:                e.StderrArtifact,
+			Actor:                         e.Actor,
+			At:                            e.Timestamp,
 		})
 		evidence := EvidenceRecord{
 			EventID:   e.EventID,
@@ -409,6 +443,11 @@ func (s *State) applyOne(e *Event) error {
 		}
 		if e.EvidenceKind == EvidenceAcceptanceRunSet {
 			if _, err := parseAcceptanceRunSetData(e.EvidenceData); err != nil {
+				return err
+			}
+		}
+		if e.EvidenceKind == EvidenceReviewChecklist {
+			if err := validateReviewChecklistEvidence(e.EvidenceData); err != nil {
 				return err
 			}
 		}
@@ -675,6 +714,9 @@ func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec
 	if !n.AcceptanceEventAt.IsZero() && n.AcceptanceEventAt.After(rec.At) {
 		return fmt.Errorf("task_completed #%d uses acceptance_run_set before latest acceptance revision", n.ID)
 	}
+	if data.ExecutionContext != nil && !n.EnvelopeEventAt.IsZero() && n.EnvelopeEventAt.After(rec.At) {
+		return fmt.Errorf("task_completed #%d uses acceptance_run_set before latest execution envelope revision", n.ID)
+	}
 	if len(data.Checks) != len(checks) {
 		return fmt.Errorf("task_completed #%d acceptance_run_set covers %d checks, want %d", n.ID, len(data.Checks), len(checks))
 	}
@@ -706,7 +748,7 @@ func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec
 		if complete.AttemptID == "" || run.AttemptID != complete.AttemptID || rec.AttemptID != complete.AttemptID {
 			return fmt.Errorf("task_completed #%d acceptance_run_set attempt mismatch", n.ID)
 		}
-		if execContextDigestFromRun(run) != data.ExecContextDigest {
+		if execContextDigestFromRun(run) != data.ContextDigest {
 			return fmt.Errorf("task_completed #%d run %s exec context mismatch", n.ID, run.EventID)
 		}
 	}

@@ -37,9 +37,9 @@ Start from an empty repo:
 Command surface:
   cst add  --intent "Root goal"
   cst add  --parent <id> --goal --intent "Child goal / workstream"
-  cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--after <node-id> ...]
+  cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]
   cst add  --parent <id> --rule "Invariant or context visible to agents"
-  cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--after <id> ... | --clear-after] [--reason "..."]
+  cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--after <id> ... | --clear-after] [--reason "..."]
 
   cst brief [--within <id>] [--history]
   cst claims [--within <id>]
@@ -57,11 +57,11 @@ Command surface:
   cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
   cst hold <task-id> --clear
   cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
-  cst run <task-id> --exec-cwd <checkout-root> --acceptance
+  cst run <task-id> [--exec-cwd <checkout-root>] --acceptance
   cst evidence <id> --kind <kind> --summary "..." [--data JSON]
   cst evidence <id> --kind note --summary "Process note..."
-  cst done <task-id> [--exec-cwd <checkout-root>]
-  cst done <task-id> --from-acceptance <evidence-id>
+  cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
+  cst done <task-id> --from-acceptance <evidence-id> [--commit <sha>]
   cst done <task-id> [--evidence <event-id> | --note "..."]
   cst cancel <id> --reason "..."
 
@@ -112,9 +112,14 @@ Evidence and scripts:
   without completing the task.
   cst done on a verify task records script_run(trigger=acceptance) for each check,
   then records acceptance_run_set and points task_completed.evidence_id at it.
-  Worker mode keeps ledger and execution identities separate:
-    cst --store /central/repo run 12 --exec-cwd /worker/repo --acceptance
+  Execution envelopes keep ledger and execution identities separate:
+    cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
+    cst --store /central/repo run 12 --acceptance
     cst --store /central/repo done 12 --from-acceptance <evidence-id>
+  --exec-cwd on add/revise becomes the task default. --exec-cwd on run/done is
+  a one-command override. Private exec surfaces reject any final context drift.
+  Shared surfaces reject scoped drift but record context_drift evidence and
+  allow out-of-scope drift because shared checkout attribution is unknowable.
   cst evidence records structured evidence; --data must be JSON.
   claim, script_run, evidence, and completion events from one claim share attempt_id.
   Process notes are evidence: use --kind note. Do not add task note fields or
@@ -146,6 +151,8 @@ Storage:
 
 Global flags:
   --human   emit human-readable text
+  --actor <agent-id>
+            set explicit actor identity for claim ownership and same-actor lease renewal
   --store <repo-root>
             read/write the CST ledger under this repo root
   --help    show this help
@@ -168,8 +175,9 @@ func main() {
 	args := os.Args[1:]
 	asJSON := true
 	storeRoot := ""
+	actor := ""
 	var err error
-	args, asJSON, storeRoot, err = extractLeadingGlobalFlags(args, asJSON)
+	args, asJSON, storeRoot, actor, err = extractLeadingGlobalFlags(args, asJSON)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cst:", err)
 		os.Exit(int(cst.ExitUsage))
@@ -179,6 +187,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "cst:", err)
 			os.Exit(int(cst.ExitUsage))
 		}
+	}
+	if actor != "" {
+		cst.SetActor(actor)
 	}
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -238,13 +249,14 @@ func main() {
 	}
 }
 
-func extractLeadingGlobalFlags(args []string, current bool) ([]string, bool, string, error) {
+func extractLeadingGlobalFlags(args []string, current bool) ([]string, bool, string, string, error) {
 	val := current
 	storeRoot := ""
+	actor := ""
 	for len(args) > 0 {
 		if args[0] == "--store" {
 			if len(args) < 2 || args[1] == "" {
-				return args, val, storeRoot, fmt.Errorf("--store requires a path")
+				return args, val, storeRoot, actor, fmt.Errorf("--store requires a path")
 			}
 			storeRoot = args[1]
 			args = args[2:]
@@ -253,14 +265,30 @@ func extractLeadingGlobalFlags(args []string, current bool) ([]string, bool, str
 		if strings.HasPrefix(args[0], "--store=") {
 			storeRoot = strings.TrimPrefix(args[0], "--store=")
 			if storeRoot == "" {
-				return args, val, storeRoot, fmt.Errorf("--store requires a path")
+				return args, val, storeRoot, actor, fmt.Errorf("--store requires a path")
+			}
+			args = args[1:]
+			continue
+		}
+		if args[0] == "--actor" {
+			if len(args) < 2 || args[1] == "" {
+				return args, val, storeRoot, actor, fmt.Errorf("--actor requires an id")
+			}
+			actor = args[1]
+			args = args[2:]
+			continue
+		}
+		if strings.HasPrefix(args[0], "--actor=") {
+			actor = strings.TrimPrefix(args[0], "--actor=")
+			if actor == "" {
+				return args, val, storeRoot, actor, fmt.Errorf("--actor requires an id")
 			}
 			args = args[1:]
 			continue
 		}
 		next, ok, err := formatFlagValue(args[0], val)
 		if err != nil {
-			return args, val, storeRoot, err
+			return args, val, storeRoot, actor, err
 		}
 		if !ok {
 			break
@@ -268,7 +296,7 @@ func extractLeadingGlobalFlags(args []string, current bool) ([]string, bool, str
 		val = next
 		args = args[1:]
 	}
-	return args, val, storeRoot, nil
+	return args, val, storeRoot, actor, nil
 }
 
 func extractFormatFlag(args []string, current bool) ([]string, bool, error) {
@@ -347,6 +375,28 @@ func (f checkListFlag) Values() []cst.VerifyCheck {
 	return append([]cst.VerifyCheck(nil), f...)
 }
 
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("empty value")
+	}
+	*f = append(*f, raw)
+	return nil
+}
+
+func (f stringListFlag) Values() []string {
+	return append([]string(nil), f...)
+}
+
 func addCommandFormatFlags(fs *flag.FlagSet) commandFormatFlags {
 	return commandFormatFlags{
 		human: fs.Bool("human", false, "emit human-readable text"),
@@ -375,10 +425,14 @@ func runAdd(args []string, asJSON bool) error {
 	rule := fs.String("rule", "", "rule text (creates a rule node)")
 	verify := fs.String("verify", "", "verify acceptance command")
 	review := fs.String("review", "", "review acceptance reviewer")
+	execCWD := fs.String("exec-cwd", "", "default checkout root for task execution")
+	privateExec := fs.Bool("private-exec-cwd", false, "mark exec-cwd as actor-private mutable surface")
 	var after idListFlag
 	var checks checkListFlag
+	var scope stringListFlag
 	fs.Var(&after, "after", "readiness prerequisite node id (repeatable)")
 	fs.Var(&checks, "check", "named verify check in name=cmd form (repeatable)")
+	fs.Var(&scope, "scope", "owned path under exec checkout (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -386,6 +440,13 @@ func runAdd(args []string, asJSON bool) error {
 	asJSON, err = resolveCommandFormat(fs, asJSON, format)
 	if err != nil {
 		return err
+	}
+	envelope, err := buildAddEnvelope(*execCWD, *privateExec, scope.Values())
+	if err != nil {
+		return err
+	}
+	if envelope != nil && (*goal || *rule != "") {
+		return fmt.Errorf("execution envelope flags apply only to tasks")
 	}
 	return cst.DoAdd(os.Stdout, cst.AddArgs{
 		Parent:           *parent,
@@ -396,7 +457,26 @@ func runAdd(args []string, asJSON bool) error {
 		VerifyChecks:     checks.Values(),
 		AcceptanceReview: *review,
 		After:            after.Values(),
+		Envelope:         envelope,
 	}, asJSON)
+}
+
+func buildAddEnvelope(execCWD string, private bool, ownedPaths []string) (*cst.ExecutionEnvelope, error) {
+	if !private && execCWD == "" && len(ownedPaths) == 0 {
+		return nil, nil
+	}
+	if private && execCWD == "" {
+		return nil, fmt.Errorf("--private-exec-cwd requires --exec-cwd")
+	}
+	surface := cst.ExecSurfaceShared
+	if private {
+		surface = cst.ExecSurfacePrivate
+	}
+	return &cst.ExecutionEnvelope{
+		ExecCWD:     execCWD,
+		ExecSurface: surface,
+		OwnedPaths:  ownedPaths,
+	}, nil
 }
 
 func runRevise(args []string, asJSON bool) error {
@@ -411,11 +491,17 @@ func runRevise(args []string, asJSON bool) error {
 	rule := fs.String("rule", "", "new rule text")
 	verify := fs.String("verify", "", "new verify acceptance command")
 	review := fs.String("review", "", "new review acceptance reviewer")
+	execCWD := fs.String("exec-cwd", "", "new default checkout root for task execution")
+	privateExec := fs.Bool("private-exec-cwd", false, "mark exec-cwd as actor-private mutable surface")
+	sharedExec := fs.Bool("shared-exec-cwd", false, "mark exec-cwd as shared mutable surface")
 	var after idListFlag
 	var checks checkListFlag
+	var scope stringListFlag
 	fs.Var(&after, "after", "replace readiness prerequisites with node id (repeatable)")
 	fs.Var(&checks, "check", "replace verify acceptance with named check in name=cmd form (repeatable)")
+	fs.Var(&scope, "scope", "replace owned path under exec checkout (repeatable)")
 	clearAfter := fs.Bool("clear-after", false, "clear readiness prerequisites")
+	clearScope := fs.Bool("clear-scope", false, "clear owned path scope")
 	reason := fs.String("reason", "", "revision reason")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -426,6 +512,8 @@ func runRevise(args []string, asJSON bool) error {
 	}
 	parentSet := false
 	afterSet := *clearAfter
+	execCWDSet := false
+	scopeSet := *clearScope
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "parent" {
 			parentSet = true
@@ -433,9 +521,33 @@ func runRevise(args []string, asJSON bool) error {
 		if f.Name == "after" {
 			afterSet = true
 		}
+		if f.Name == "exec-cwd" {
+			execCWDSet = true
+		}
+		if f.Name == "scope" {
+			scopeSet = true
+		}
 	})
 	if *clearAfter && len(after) > 0 {
 		return fmt.Errorf("revise uses either --after or --clear-after, not both")
+	}
+	if *clearScope && len(scope) > 0 {
+		return fmt.Errorf("revise uses either --scope or --clear-scope, not both")
+	}
+	if *privateExec && *sharedExec {
+		return fmt.Errorf("revise uses either --private-exec-cwd or --shared-exec-cwd, not both")
+	}
+	patch := cst.ExecutionEnvelopePatch{
+		ExecCWDSet:     execCWDSet,
+		ExecCWD:        *execCWD,
+		ExecSurfaceSet: *privateExec || *sharedExec || execCWDSet,
+		OwnedPathsSet:  scopeSet,
+		OwnedPaths:     scope.Values(),
+	}
+	if *privateExec {
+		patch.ExecSurface = cst.ExecSurfacePrivate
+	} else {
+		patch.ExecSurface = cst.ExecSurfaceShared
 	}
 	return cst.DoRevise(os.Stdout, id, cst.ReviseArgs{
 		ParentSet:        parentSet,
@@ -445,6 +557,8 @@ func runRevise(args []string, asJSON bool) error {
 		AcceptanceVerify: *verify,
 		VerifyChecks:     checks.Values(),
 		AcceptanceReview: *review,
+		EnvelopeSet:      patch.ExecCWDSet || patch.ExecSurfaceSet || patch.OwnedPathsSet,
+		EnvelopePatch:    patch,
 		AfterSet:         afterSet,
 		After:            after.Values(),
 		Reason:           *reason,
@@ -534,6 +648,7 @@ func runDone(args []string, asJSON bool) error {
 	note := fs.String("note", "", "inline review note evidence")
 	execCWD := fs.String("exec-cwd", "", "checkout root for verify shell execution")
 	fromAcceptance := fs.String("from-acceptance", "", "acceptance_run_set evidence id")
+	commitSHA := fs.String("commit", "", "git commit sha to bind as auxiliary evidence")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -546,6 +661,7 @@ func runDone(args []string, asJSON bool) error {
 		Note:             *note,
 		ExecCWD:          *execCWD,
 		FromAcceptanceID: *fromAcceptance,
+		CommitSHA:        *commitSHA,
 	}, asJSON)
 }
 

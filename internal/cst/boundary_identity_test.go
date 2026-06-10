@@ -140,8 +140,9 @@ func TestRunAcceptanceThenDoneFromAcceptance(t *testing.T) {
 	t.Setenv("CST_ACTOR", "alice")
 	mustDoAdd(t, AddArgs{Intent: "root"})
 	mustDoAdd(t, AddArgs{
-		Parent: 1,
-		Intent: "task",
+		Parent:   1,
+		Intent:   "task",
+		Envelope: &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfaceShared},
 		VerifyChecks: []VerifyCheck{
 			{Name: "unit", Cmd: "true"},
 			{Name: "lint", Cmd: "true"},
@@ -150,7 +151,7 @@ func TestRunAcceptanceThenDoneFromAcceptance(t *testing.T) {
 	if err := DoTake(io.Discard, 2, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true, ExecCWD: worker}, false); err != nil {
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
 		t.Fatal(err)
 	}
 	state := replayState(t)
@@ -174,6 +175,198 @@ func TestRunAcceptanceThenDoneFromAcceptance(t *testing.T) {
 	task = state.Nodes[2]
 	if !task.Completed || task.CompletedEvidence != runSet.EventID {
 		t.Fatalf("from-acceptance completion mismatch: %+v", task)
+	}
+}
+
+func TestExplicitActorRenewsExpiredClaimForAcceptance(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	now := time.Now().Add(-time.Hour)
+	expired := now.Add(time.Minute)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "alice", Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "alice", Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: NewVerifyAcceptance("true")},
+		{EventID: "claim", Timestamp: now, Actor: "alice", Type: EvClaimTaken, AttemptID: "attempt", NodeID: 2, LeaseID: "lease", LeaseExpiresAt: &expired},
+	}
+	if err := Append(events...); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	renewed := false
+	for _, ev := range replayEvents(t) {
+		if ev.Type == EvClaimRenewed && ev.Actor == "alice" && ev.LeaseID == "lease" {
+			renewed = true
+		}
+		if ev.Type == EvClaimAbandoned {
+			t.Fatalf("same actor acceptance should renew, not abandon: %+v", ev)
+		}
+	}
+	if !renewed {
+		t.Fatal("expected claim_renewed before acceptance run")
+	}
+}
+
+func TestOtherActorExpiredClaimIsNotSilentlyRetaken(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "bob")
+	now := time.Now().Add(-time.Hour)
+	expired := now.Add(time.Minute)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "alice", Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "alice", Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: NewVerifyAcceptance("true")},
+		{EventID: "claim", Timestamp: now, Actor: "alice", Type: EvClaimTaken, AttemptID: "attempt", NodeID: 2, LeaseID: "lease", LeaseExpiresAt: &expired},
+	}
+	if err := Append(events...); err != nil {
+		t.Fatal(err)
+	}
+	err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false)
+	if err == nil || !strings.Contains(err.Error(), "expired claim by alice") {
+		t.Fatalf("expected explicit conflict, got %v", err)
+	}
+	for _, ev := range replayEvents(t) {
+		if ev.Type == EvClaimAbandoned || ev.Type == EvClaimTaken && ev.Actor == "bob" {
+			t.Fatalf("other actor must not auto-retake expired claim: %+v", ev)
+		}
+	}
+}
+
+func TestPrivateExecutionContextDriftRejectsFromAcceptance(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+	writeAndCommit(t, worker, "owned.txt", "clean\n")
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfacePrivate, OwnedPaths: []string{"owned.txt"}},
+		AcceptanceVerify: "true",
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	runSetID := latestEvidenceID(t, 2, EvidenceAcceptanceRunSet)
+	if err := os.WriteFile(filepath.Join(worker, "owned.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := DoDone(io.Discard, 2, DoneArgs{FromAcceptanceID: runSetID}, false)
+	if err == nil || !strings.Contains(err.Error(), "private execution context drifted") {
+		t.Fatalf("expected private drift rejection, got %v", err)
+	}
+}
+
+func TestSharedOutOfScopeDriftRecordsEvidenceAndCompletes(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+	writeAndCommit(t, worker, "owned.txt", "clean\n")
+	writeAndCommit(t, worker, "other.txt", "clean\n")
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfaceShared, OwnedPaths: []string{"owned.txt"}},
+		AcceptanceVerify: "true",
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	runSetID := latestEvidenceID(t, 2, EvidenceAcceptanceRunSet)
+	if err := os.WriteFile(filepath.Join(worker, "other.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoDone(io.Discard, 2, DoneArgs{FromAcceptanceID: runSetID}, false); err != nil {
+		t.Fatal(err)
+	}
+	state := replayState(t)
+	task := state.Nodes[2]
+	if !task.Completed {
+		t.Fatal("task should complete on shared out-of-scope drift")
+	}
+	if latestEvidenceID(t, 2, EvidenceContextDrift) == "" {
+		t.Fatalf("expected context_drift evidence: %+v", task.Evidences)
+	}
+}
+
+func TestSharedScopedDriftRejectsFromAcceptance(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+	writeAndCommit(t, worker, "owned.txt", "clean\n")
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfaceShared, OwnedPaths: []string{"owned.txt"}},
+		AcceptanceVerify: "true",
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	runSetID := latestEvidenceID(t, 2, EvidenceAcceptanceRunSet)
+	if err := os.WriteFile(filepath.Join(worker, "owned.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := DoDone(io.Discard, 2, DoneArgs{FromAcceptanceID: runSetID}, false)
+	if err == nil || !strings.Contains(err.Error(), "scoped execution context drifted") {
+		t.Fatalf("expected scoped drift rejection, got %v", err)
+	}
+}
+
+func TestReviewChecklistEvidenceShape(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "review", AcceptanceReview: "self"})
+	valid := `{"items":[{"id":"api","criterion":"review API boundary","status":"pass","evidence":"checked handlers"}],"blind_spots":[]}`
+	if err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceReviewChecklist, Summary: "review checklist", Data: valid}, false); err != nil {
+		t.Fatal(err)
+	}
+	invalid := `{"items":[{"id":"api","criterion":"review API boundary","status":"maybe","evidence":"checked"}]}`
+	if err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceReviewChecklist, Summary: "bad checklist", Data: invalid}, false); err == nil {
+		t.Fatal("expected invalid review checklist status to fail")
+	}
+}
+
+func TestClaimsShowPathOverlaps(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "a", AcceptanceReview: "self", Envelope: &ExecutionEnvelope{ExecCWD: "/tmp/work", ExecSurface: ExecSurfaceShared, OwnedPaths: []string{"src"}}})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "b", AcceptanceReview: "self", Envelope: &ExecutionEnvelope{ExecCWD: "/tmp/work", ExecSurface: ExecSurfaceShared, OwnedPaths: []string{"src/lib"}}})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CST_ACTOR", "bob")
+	if err := DoTake(io.Discard, 3, false); err != nil {
+		t.Fatal(err)
+	}
+	view, err := BuildClaimsView(replayState(t), 0, time.Now(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Overlaps) != 1 {
+		t.Fatalf("expected one path overlap, got %+v", view.Overlaps)
 	}
 }
 
@@ -217,6 +410,26 @@ func initGitRepo(t *testing.T, dir string) {
 	}
 	runGit(t, dir, "add", "tracked.txt")
 	runGit(t, dir, "commit", "-m", "initial")
+}
+
+func writeAndCommit(t *testing.T, dir string, path string, data string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, path), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", path)
+	runGit(t, dir, "commit", "-m", "add "+path)
+}
+
+func latestEvidenceID(t *testing.T, nodeID int64, kind string) string {
+	t.Helper()
+	task := replayState(t).Nodes[nodeID]
+	for i := len(task.Evidences) - 1; i >= 0; i-- {
+		if task.Evidences[i].Kind == kind {
+			return task.Evidences[i].EventID
+		}
+	}
+	return ""
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

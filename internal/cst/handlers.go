@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -43,6 +44,7 @@ type AddArgs struct {
 	VerifyChecks     []VerifyCheck
 	AcceptanceReview string
 	After            []int64
+	Envelope         *ExecutionEnvelope
 }
 
 type DoneArgs struct {
@@ -50,6 +52,7 @@ type DoneArgs struct {
 	Note             string
 	FromAcceptanceID string
 	ExecCWD          string
+	CommitSHA        string
 }
 
 type RunArgs struct {
@@ -81,6 +84,8 @@ type ReviseArgs struct {
 	AcceptanceVerify string
 	VerifyChecks     []VerifyCheck
 	AcceptanceReview string
+	EnvelopeSet      bool
+	EnvelopePatch    ExecutionEnvelopePatch
 	AfterSet         bool
 	After            []int64
 	Reason           string
@@ -117,7 +122,7 @@ func DoAdd(out io.Writer, args AddArgs, asJSON bool) error {
 		if err != nil {
 			return err
 		}
-		ev, err := tx.CreateTask(args.Parent, args.Intent, acceptance, args.After)
+		ev, err := tx.CreateTask(args.Parent, args.Intent, acceptance, args.After, args.Envelope)
 		if err != nil {
 			return err
 		}
@@ -192,14 +197,16 @@ func DoRevise(out io.Writer, id int64, args ReviseArgs, asJSON bool) error {
 	var emitted *Event
 	err = WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
 		ev, err := tx.ReviseNode(id, ReviseSpec{
-			ParentSet:  args.ParentSet,
-			Parent:     args.Parent,
-			Intent:     args.Intent,
-			RuleText:   args.Rule,
-			Acceptance: acceptance,
-			AfterSet:   args.AfterSet,
-			After:      args.After,
-			Reason:     args.Reason,
+			ParentSet:     args.ParentSet,
+			Parent:        args.Parent,
+			Intent:        args.Intent,
+			RuleText:      args.Rule,
+			Acceptance:    acceptance,
+			EnvelopeSet:   args.EnvelopeSet,
+			EnvelopePatch: args.EnvelopePatch,
+			AfterSet:      args.AfterSet,
+			After:         args.After,
+			Reason:        args.Reason,
 		})
 		if err != nil {
 			return err
@@ -366,13 +373,21 @@ func DoRun(out io.Writer, id int64, override string, checkName string, asJSON bo
 }
 
 func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
+	if args.Acceptance {
+		if args.Override != "" || args.CheckName != "" {
+			return herr(ExitUsage, "run --acceptance cannot be combined with --cmd or --check")
+		}
+		return runAcceptanceWithoutCompletion(out, id, args.ExecCWD, asJSON)
+	}
 	var (
-		cmdToRun string
-		label    string
-		leaseID  string
-		cfg      Config
-		paths    StorePaths
-		storeID  string
+		cmdToRun         string
+		label            string
+		leaseID          string
+		cfg              Config
+		paths            StorePaths
+		storeID          string
+		env              ExecutionEnvelope
+		effectiveExecCWD string
 	)
 	err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
 		n, err := tx.requireOpenTask(id)
@@ -382,14 +397,10 @@ func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 		cfg = tx.cfg
 		paths = tx.StorePaths()
 		storeID = tx.StoreID()
+		env = effectiveExecutionEnvelope(n)
+		effectiveExecCWD = resolveExecCWD(args.ExecCWD, env)
 		if n.Claim != nil && n.Claim.Actor == tx.actor {
 			leaseID = n.Claim.LeaseID
-		}
-		if args.Acceptance {
-			if args.Override != "" || args.CheckName != "" {
-				return herr(ExitUsage, "run --acceptance cannot be combined with --cmd or --check")
-			}
-			return nil
 		}
 		if args.Override != "" {
 			cmdToRun = args.Override
@@ -410,10 +421,6 @@ func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if args.Acceptance {
-		return runAcceptanceWithoutCompletion(out, id, args.ExecCWD, asJSON)
-	}
-
 	actor := ResolveActor(cfg.ActorDefault)
 	var renew LeaseRenewer
 	if leaseID != "" {
@@ -426,9 +433,10 @@ func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 		Cmd:         cmdToRun,
 		Trigger:     TriggerProbe,
 		CheckName:   label,
-		ExecCWD:     args.ExecCWD,
+		ExecCWD:     effectiveExecCWD,
 		StoreID:     storeID,
 		ArtifactDir: paths.RunArtifactsDir(),
+		Envelope:    env,
 		Renew:       renew,
 		RenewEvery:  cfg.ClaimRenewEvery,
 	})
@@ -513,6 +521,7 @@ type verifyRunContext struct {
 	ExecCWD     string
 	StoreID     string
 	ArtifactDir string
+	Envelope    ExecutionEnvelope
 }
 
 func runVerifyChecks(cfg Config, checks []VerifyCheck, renew LeaseRenewer, runCtx verifyRunContext) []RunResult {
@@ -526,6 +535,7 @@ func runVerifyChecks(cfg Config, checks []VerifyCheck, renew LeaseRenewer, runCt
 			ExecCWD:     runCtx.ExecCWD,
 			StoreID:     runCtx.StoreID,
 			ArtifactDir: runCtx.ArtifactDir,
+			Envelope:    runCtx.Envelope,
 			Renew:       renew,
 			RenewEvery:  cfg.ClaimRenewEvery,
 		})
@@ -565,12 +575,18 @@ func recordScriptRunsOnly(id int64, results []RunResult) error {
 
 func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJSON bool) error {
 	var (
-		guard   CompletionGuard
-		cfg     Config
-		paths   StorePaths
-		storeID string
+		guard            CompletionGuard
+		cfg              Config
+		paths            StorePaths
+		storeID          string
+		env              ExecutionEnvelope
+		effectiveExecCWD string
+		actor            string
 	)
-	if err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	if err := WithStore(TxOpts{Mutating: true, RepairLease: false}, func(tx *Tx) error {
+		if _, err := tx.RenewExecutionClaim(id); err != nil {
+			return err
+		}
 		g, err := tx.PrepareCompletionGuard(id)
 		if err != nil {
 			return err
@@ -582,11 +598,13 @@ func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJ
 		cfg = tx.cfg
 		paths = tx.StorePaths()
 		storeID = tx.StoreID()
+		actor = tx.actor
+		env = effectiveExecutionEnvelope(tx.Snapshot().Nodes[id])
+		effectiveExecCWD = resolveExecCWD(execCWD, env)
 		return nil
 	}); err != nil {
 		return err
 	}
-	actor := ResolveActor(cfg.ActorDefault)
 	var renew LeaseRenewer
 	if guard.ClaimLeaseID != "" {
 		renew = func(t time.Time) error {
@@ -594,9 +612,10 @@ func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJ
 		}
 	}
 	results := runVerifyChecks(cfg, guard.VerifyChecks, renew, verifyRunContext{
-		ExecCWD:     execCWD,
+		ExecCWD:     effectiveExecCWD,
 		StoreID:     storeID,
 		ArtifactDir: paths.RunArtifactsDir(),
+		Envelope:    env,
 	})
 	failed := firstFailedRun(results)
 	artifactErr := firstArtifactError(results)
@@ -663,14 +682,23 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	if args.FromAcceptanceID != "" && (args.EvidenceID != "" || args.Note != "" || args.ExecCWD != "") {
 		return herr(ExitUsage, "--from-acceptance cannot be combined with --evidence, --note, or --exec-cwd")
 	}
+	if args.CommitSHA != "" && !validCommitSHA(args.CommitSHA) {
+		return herr(ExitUsage, "--commit requires a git commit sha")
+	}
 	var (
-		guard   CompletionGuard
-		cfg     Config
-		paths   StorePaths
-		storeID string
+		guard            CompletionGuard
+		cfg              Config
+		paths            StorePaths
+		storeID          string
+		env              ExecutionEnvelope
+		effectiveExecCWD string
+		actor            string
 	)
 	// Phase 1: validate, capture guard, release lock.
-	err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	err := WithStore(TxOpts{Mutating: true, RepairLease: false}, func(tx *Tx) error {
+		if _, err := tx.RenewExecutionClaim(id); err != nil {
+			return err
+		}
 		g, err := tx.PrepareCompletionGuard(id)
 		if err != nil {
 			return err
@@ -679,6 +707,9 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		cfg = tx.cfg
 		paths = tx.StorePaths()
 		storeID = tx.StoreID()
+		env = effectiveExecutionEnvelope(tx.Snapshot().Nodes[id])
+		effectiveExecCWD = resolveExecCWD(args.ExecCWD, env)
+		actor = tx.actor
 		return nil
 	})
 	if err != nil {
@@ -694,6 +725,12 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		}
 		var emitted *Event
 		err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+			if _, err := validateAcceptanceContextForCompletion(tx, id, args.FromAcceptanceID, ""); err != nil {
+				return err
+			}
+			if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+				return err
+			}
 			ev, err := tx.CompleteTask(guard, args.FromAcceptanceID)
 			if err != nil {
 				return err
@@ -720,6 +757,9 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 				}
 				evidenceID = ev.EventID
 			}
+			if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+				return err
+			}
 			ev, err := tx.CompleteTask(guard, evidenceID)
 			if err != nil {
 				return err
@@ -735,7 +775,6 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	}
 
 	// Phase 2: run the verify shell with no lock held.
-	actor := ResolveActor(cfg.ActorDefault)
 	var renew LeaseRenewer
 	if guard.ClaimLeaseID != "" {
 		renew = func(t time.Time) error {
@@ -743,9 +782,10 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		}
 	}
 	results := runVerifyChecks(cfg, guard.VerifyChecks, renew, verifyRunContext{
-		ExecCWD:     args.ExecCWD,
+		ExecCWD:     effectiveExecCWD,
 		StoreID:     storeID,
 		ArtifactDir: paths.RunArtifactsDir(),
+		Envelope:    env,
 	})
 	failed := firstFailedRun(results)
 	artifactErr := firstArtifactError(results)
@@ -785,6 +825,12 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 			return err
 		}
 		runSetEvent = ev
+		if _, err := validateAcceptanceContextForCompletion(tx, id, runSetEvent.EventID, effectiveExecCWD); err != nil {
+			return err
+		}
+		if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+			return err
+		}
 		ev, err = tx.CompleteTask(guard, runSetEvent.EventID)
 		if err != nil {
 			return err
@@ -809,6 +855,27 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 func isHandlerErr(err error) bool {
 	_, ok := err.(*HandlerError)
 	return ok
+}
+
+var commitSHARE = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+
+func validCommitSHA(value string) bool {
+	return commitSHARE.MatchString(strings.TrimSpace(value))
+}
+
+func recordCommitEvidenceIfRequested(tx *Tx, id int64, sha string) error {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return nil
+	}
+	raw, err := json.Marshal(struct {
+		SHA string `json:"sha"`
+	}{SHA: sha})
+	if err != nil {
+		return err
+	}
+	_, err = tx.RecordEvidence(id, EvidenceCommit, "commit "+sha, raw)
+	return err
 }
 
 func emitDone(out io.Writer, asJSON bool, ev *Event, runs []RunResult) {

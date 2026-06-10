@@ -145,9 +145,9 @@ empty.
 ```sh
 cst add  --intent "Root goal"
 cst add  --parent <id> --goal --intent "Child goal / workstream"
-cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--after <node-id> ...]
+cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]
 cst add  --parent <id> --rule "Invariant or context visible to agents"
-cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--after <id> ... | --clear-after] [--reason "..."]
+cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--after <id> ... | --clear-after] [--reason "..."]
 
 cst brief [--within <id>] [--history]
 cst claims [--within <id>]
@@ -164,11 +164,11 @@ cst release <task-id>
 cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
 cst hold <task-id> --clear
 cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
-cst run <task-id> --exec-cwd <checkout-root> --acceptance
+cst run <task-id> [--exec-cwd <checkout-root>] --acceptance
 cst evidence <id> --kind <kind> --summary "..." [--data JSON]
 cst evidence <id> --kind note --summary "Process note..."
-cst done <task-id> [--exec-cwd <checkout-root>]
-cst done <task-id> --from-acceptance <acceptance-run-set-evidence-id>
+cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
+cst done <task-id> --from-acceptance <acceptance-run-set-evidence-id> [--commit <sha>]
 cst done <task-id> [--evidence <event-id> | --note "..."]
 cst cancel <id> --reason "..."
 ```
@@ -207,19 +207,29 @@ script run. Completion replays the run-set and rejects missing checks, failed
 runs, mixed execution contexts, stale acceptance digests, and manual `--note` or
 ordinary `--evidence` on verify tasks.
 
-Worker checkouts must separate ledger identity from execution identity:
+Worker checkouts must separate ledger identity from execution identity. For
+cross-session completion, persist the execution envelope on the task first:
 
 ```sh
-cst --store /central/repo run 12 --exec-cwd /worker/repo --acceptance
+cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
+cst --store /central/repo run 12 --acceptance
 cst --store /central/repo done 12 --from-acceptance <acceptance-run-set-evidence-id>
 ```
 
 `--store` chooses the CST ledger owner. `--exec-cwd` chooses the checkout where
-the shell command runs. They are independent axes. Events record `store_id`
-(the root `node_created.event_id`), `exec_cwd`, git head/branch/status, staged
-diff hash, unstaged diff hash, untracked manifest hash, and full stdout/stderr
-artifact references. They do not record absolute `store_root` as ledger
-identity.
+the shell command runs. They are independent axes. `--exec-cwd` on `add` or
+`revise` becomes the task default; `--exec-cwd` on `run` / `done` is only a
+one-command override and does not mutate the task envelope. Events record
+`store_id` (the root `node_created.event_id`), `exec_cwd`, git
+head/branch/status, whole-repo diff hashes, scoped diff hashes when
+`--scope` exists, out-of-scope summaries, and full stdout/stderr artifact
+references. They do not record absolute `store_root` as ledger identity.
+
+`--private-exec-cwd` means the execution checkout is actor-private. Completion
+rejects any context drift between acceptance and done. The default surface is
+`shared`; on shared checkouts, scoped drift rejects, while out-of-scope drift is
+recorded as `evidence(kind=context_drift)` because git cannot attribute that
+change to one actor.
 
 `--review <who>` means `done` requires evidence or a note.
 
@@ -311,6 +321,15 @@ repeating work.
 For review acceptance, `--note` creates `evidence_recorded(kind=note)` and completes
 in one transaction.
 
+Structured review tasks can record `evidence_recorded(kind=review_checklist)`:
+
+```json
+{"items":[{"id":"api","criterion":"review API boundary","status":"pass","evidence":"checked handlers"}],"blind_spots":[]}
+```
+
+The reducer validates checklist shape and statuses (`pass`, `fail`, `na`); it
+does not turn review judgment into a policy engine.
+
 For verify acceptance, `done` records successful `script_run(trigger=acceptance)`
 events and an `acceptance_run_set` evidence, then completes with that run-set as
 the completion evidence. `cst run` records `script_run(trigger=probe)` without
@@ -321,6 +340,10 @@ Each `script_run` keeps bounded `stdout_head` / `stderr_head` for projections.
 Full non-empty stdout/stderr is written under `.cst/artifacts/runs/` and the
 event stores relative artifact path, sha256, and byte size.
 
+`cst done --commit <sha>` records auxiliary `evidence_recorded(kind=commit)`.
+It never replaces verify `acceptance_run_set` or review evidence; CST binds to
+an existing commit object and does not execute `git commit`.
+
 ## Tree Correction
 
 Use `revise` when the tree is wrong. It is append-only and preserves the node id,
@@ -330,8 +353,10 @@ runs, evidence, and event history.
 cst revise 4 --intent "Fix parser boundary" --reason "scope clarified"
 cst revise 4 --parent 9 --reason "belongs under validation phase"
 cst revise 4 --verify "go test ./internal/parser" --reason "acceptance was too broad"
+cst revise 4 --exec-cwd /worker/parser --private-exec-cwd --scope internal/parser --reason "worker checkout and owned boundary"
 cst revise 4 --after 7 --after 8 --reason "must wait for prerequisites"
 cst revise 4 --clear-after --reason "prerequisite was folded into the task"
+cst revise 4 --clear-scope --reason "scope moved to child tasks"
 cst revise 7 --rule "No silent fallback" --reason "wording tightened"
 ```
 
@@ -423,9 +448,12 @@ any mutation or confusing claim state.
 
 `cst claims [--within <id>]` and `cst recover [--within <id>]` are read-only
 operator projections. They list current claim holder, task, attempt id, lease
-expiry, stale status, and latest execution identity observed for that attempt.
-They do not auto-release claims. The next mutating command performs normal
-expired-lease repair through the append-only ledger.
+expiry, stale status, task envelope, path-overlap warnings, and latest
+execution identity observed for that attempt. They do not auto-release claims.
+`run --acceptance` and verify `done` can renew an active or expired claim only
+for the same explicit actor (`--actor`, `CST_ACTOR`, or `actor.default`). Other
+actors must take over explicitly; CST does not silently decide liveness or
+ownership.
 
 ## Storage
 

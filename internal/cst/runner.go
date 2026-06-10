@@ -16,34 +16,45 @@ import (
 // RunResult captures the outcome of a single shell run, suitable for storing
 // in a script_run event.
 type RunResult struct {
-	EventID                 string       `json:"event_id,omitempty"`
-	Cmd                     string       `json:"cmd"`
-	Trigger                 string       `json:"trigger"`
-	CheckName               string       `json:"check_name,omitempty"`
-	StartedAt               time.Time    `json:"started_at"`
-	DurationMs              int64        `json:"duration_ms"`
-	ExitCode                int          `json:"exit_code"`
-	StdoutHead              string       `json:"stdout_head,omitempty"`
-	StderrHead              string       `json:"stderr_head,omitempty"`
-	Truncated               bool         `json:"truncated,omitempty"`
-	StoreID                 string       `json:"store_id,omitempty"`
-	ExecCWD                 string       `json:"exec_cwd,omitempty"`
-	GitAvailable            bool         `json:"git_available"`
-	GitRoot                 string       `json:"git_root,omitempty"`
-	GitHead                 string       `json:"git_head,omitempty"`
-	GitBranch               string       `json:"git_branch,omitempty"`
-	GitStatusShort          string       `json:"git_status_short,omitempty"`
-	StagedDiffSHA256        string       `json:"staged_diff_sha256,omitempty"`
-	UnstagedDiffSHA256      string       `json:"unstaged_diff_sha256,omitempty"`
-	UntrackedManifestSHA256 string       `json:"untracked_manifest_sha256,omitempty"`
-	GitIdentityDigest       string       `json:"git_identity_digest,omitempty"`
-	ParallelWorktree        string       `json:"parallel_worktree,omitempty"`
-	ExecContextDigest       string       `json:"exec_context_digest,omitempty"`
-	StdoutArtifact          *ArtifactRef `json:"stdout_artifact,omitempty"`
-	StderrArtifact          *ArtifactRef `json:"stderr_artifact,omitempty"`
-	TimedOut                bool         `json:"timed_out,omitempty"`
-	StartError              error        `json:"start_error,omitempty"`
-	ArtifactError           error        `json:"artifact_error,omitempty"`
+	EventID                       string       `json:"event_id,omitempty"`
+	Cmd                           string       `json:"cmd"`
+	Trigger                       string       `json:"trigger"`
+	CheckName                     string       `json:"check_name,omitempty"`
+	StartedAt                     time.Time    `json:"started_at"`
+	DurationMs                    int64        `json:"duration_ms"`
+	ExitCode                      int          `json:"exit_code"`
+	StdoutHead                    string       `json:"stdout_head,omitempty"`
+	StderrHead                    string       `json:"stderr_head,omitempty"`
+	Truncated                     bool         `json:"truncated,omitempty"`
+	StoreID                       string       `json:"store_id,omitempty"`
+	ExecCWD                       string       `json:"exec_cwd,omitempty"`
+	GitAvailable                  bool         `json:"git_available"`
+	GitRoot                       string       `json:"git_root,omitempty"`
+	GitHead                       string       `json:"git_head,omitempty"`
+	GitBranch                     string       `json:"git_branch,omitempty"`
+	GitStatusShort                string       `json:"git_status_short,omitempty"`
+	StagedDiffSHA256              string       `json:"staged_diff_sha256,omitempty"`
+	UnstagedDiffSHA256            string       `json:"unstaged_diff_sha256,omitempty"`
+	UntrackedManifestSHA256       string       `json:"untracked_manifest_sha256,omitempty"`
+	GitIdentityDigest             string       `json:"git_identity_digest,omitempty"`
+	ExecSurface                   string       `json:"exec_surface,omitempty"`
+	OwnedPaths                    []string     `json:"owned_paths,omitempty"`
+	ScopedGitStatusShort          string       `json:"scoped_git_status_short,omitempty"`
+	ScopedStagedDiffSHA256        string       `json:"scoped_staged_diff_sha256,omitempty"`
+	ScopedUnstagedDiffSHA256      string       `json:"scoped_unstaged_diff_sha256,omitempty"`
+	ScopedUntrackedManifestSHA256 string       `json:"scoped_untracked_manifest_sha256,omitempty"`
+	ScopedDigest                  string       `json:"scoped_digest,omitempty"`
+	OutOfScopeGitStatusShort      string       `json:"out_of_scope_git_status_short,omitempty"`
+	OutOfScopeDeltaCount          int          `json:"out_of_scope_delta_count,omitempty"`
+	OutOfScopeDigest              string       `json:"out_of_scope_digest,omitempty"`
+	WholeRepoDigest               string       `json:"whole_repo_digest,omitempty"`
+	ParallelWorktree              string       `json:"parallel_worktree,omitempty"`
+	ExecContextDigest             string       `json:"exec_context_digest,omitempty"`
+	StdoutArtifact                *ArtifactRef `json:"stdout_artifact,omitempty"`
+	StderrArtifact                *ArtifactRef `json:"stderr_artifact,omitempty"`
+	TimedOut                      bool         `json:"timed_out,omitempty"`
+	StartError                    error        `json:"start_error,omitempty"`
+	ArtifactError                 error        `json:"artifact_error,omitempty"`
 }
 
 // LeaseRenewer is invoked periodically while a long shell command is running.
@@ -62,6 +73,7 @@ type RunOpts struct {
 	ExecCWD     string
 	StoreID     string
 	ArtifactDir string
+	Envelope    ExecutionEnvelope
 
 	StdoutMaxBytes int
 	StderrMaxBytes int
@@ -99,9 +111,6 @@ func Run(opts RunOpts) RunResult {
 	if abs, err := filepath.Abs(execCWD); err == nil {
 		execCWD = abs
 	}
-	identity := CaptureExecIdentity(execCWD)
-	identity.ExecContextDigest = execContextDigest(opts.StoreID, identity)
-
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", opts.Cmd)
 	cmd.Dir = execCWD
 	stdoutBuf := newCappedBuffer(stdoutMax)
@@ -117,30 +126,22 @@ func Run(opts RunOpts) RunResult {
 		eventID = NewEventID()
 	}
 	res := RunResult{
-		EventID:                 eventID,
-		Cmd:                     opts.Cmd,
-		Trigger:                 opts.Trigger,
-		CheckName:               opts.CheckName,
-		StartedAt:               start,
-		StoreID:                 opts.StoreID,
-		ExecCWD:                 identity.ExecCWD,
-		GitAvailable:            identity.GitAvailable,
-		GitRoot:                 identity.GitRoot,
-		GitHead:                 identity.GitHead,
-		GitBranch:               identity.GitBranch,
-		GitStatusShort:          identity.GitStatusShort,
-		StagedDiffSHA256:        identity.StagedDiffSHA256,
-		UnstagedDiffSHA256:      identity.UnstagedDiffSHA256,
-		UntrackedManifestSHA256: identity.UntrackedManifestSHA256,
-		GitIdentityDigest:       identity.GitIdentityDigest,
-		ParallelWorktree:        identity.ParallelWorktree,
-		ExecContextDigest:       identity.ExecContextDigest,
+		EventID:   eventID,
+		Cmd:       opts.Cmd,
+		Trigger:   opts.Trigger,
+		CheckName: opts.CheckName,
+		StartedAt: start,
+		StoreID:   opts.StoreID,
+		ExecCWD:   execCWD,
 	}
 
 	if err := cmd.Start(); err != nil {
 		res.StartError = err
 		res.ExitCode = -1
 		res.DurationMs = time.Since(start).Milliseconds()
+		identity := CaptureExecIdentity(execCWD, opts.Envelope)
+		identity.ExecContextDigest = execContextDigest(opts.StoreID, identity)
+		copyExecIdentityToRunResult(&res, identity)
 		return res
 	}
 
@@ -170,6 +171,9 @@ func Run(opts RunOpts) RunResult {
 		renewWG.Wait()
 	}
 	res.DurationMs = time.Since(start).Milliseconds()
+	identity := CaptureExecIdentity(execCWD, opts.Envelope)
+	identity.ExecContextDigest = execContextDigest(opts.StoreID, identity)
+	copyExecIdentityToRunResult(&res, identity)
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		res.TimedOut = true
@@ -198,6 +202,32 @@ func Run(opts RunOpts) RunResult {
 		}
 	}
 	return res
+}
+
+func copyExecIdentityToRunResult(res *RunResult, identity ExecIdentity) {
+	res.ExecCWD = identity.ExecCWD
+	res.GitAvailable = identity.GitAvailable
+	res.GitRoot = identity.GitRoot
+	res.GitHead = identity.GitHead
+	res.GitBranch = identity.GitBranch
+	res.GitStatusShort = identity.GitStatusShort
+	res.StagedDiffSHA256 = identity.StagedDiffSHA256
+	res.UnstagedDiffSHA256 = identity.UnstagedDiffSHA256
+	res.UntrackedManifestSHA256 = identity.UntrackedManifestSHA256
+	res.GitIdentityDigest = identity.GitIdentityDigest
+	res.ExecSurface = identity.ExecSurface
+	res.OwnedPaths = append([]string(nil), identity.OwnedPaths...)
+	res.ScopedGitStatusShort = identity.ScopedGitStatusShort
+	res.ScopedStagedDiffSHA256 = identity.ScopedStagedDiffSHA256
+	res.ScopedUnstagedDiffSHA256 = identity.ScopedUnstagedDiffSHA256
+	res.ScopedUntrackedManifestSHA256 = identity.ScopedUntrackedManifestSHA256
+	res.ScopedDigest = identity.ScopedDigest
+	res.OutOfScopeGitStatusShort = identity.OutOfScopeGitStatusShort
+	res.OutOfScopeDeltaCount = identity.OutOfScopeDeltaCount
+	res.OutOfScopeDigest = identity.OutOfScopeDigest
+	res.WholeRepoDigest = identity.WholeRepoDigest
+	res.ParallelWorktree = identity.ParallelWorktree
+	res.ExecContextDigest = identity.ExecContextDigest
 }
 
 func writeRunArtifact(dir string, eventID string, suffix string, data []byte) (*ArtifactRef, error) {

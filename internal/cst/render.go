@@ -414,25 +414,27 @@ type ShowView struct {
 	RecentRunsMeta     *CollectionMeta   `json:"recent_runs_meta,omitempty"`
 	RecentEvidence     []EvidenceRecord  `json:"recent_evidence,omitempty"`
 	RecentEvidenceMeta *CollectionMeta   `json:"recent_evidence_meta,omitempty"`
+	LatestContextDrift *EvidenceRecord   `json:"latest_context_drift,omitempty"`
 }
 
 type NodeDetail struct {
-	ID                int64       `json:"id"`
-	ParentID          int64       `json:"parent_id,omitempty"`
-	Kind              string      `json:"kind"`
-	Intent            string      `json:"intent,omitempty"`
-	RuleText          string      `json:"rule_text,omitempty"`
-	Acceptance        *Acceptance `json:"acceptance,omitempty"`
-	After             []int64     `json:"after,omitempty"`
-	CreatedAt         time.Time   `json:"created_at"`
-	CreatedBy         string      `json:"created_by"`
-	CompletedAt       time.Time   `json:"completed_at,omitempty"`
-	CompletedEvidence string      `json:"completed_evidence_id,omitempty"`
-	CanceledAt        time.Time   `json:"canceled_at,omitempty"`
-	CanceledReason    string      `json:"canceled_reason,omitempty"`
-	Claim             *Claim      `json:"claim,omitempty"`
-	Hold              *Hold       `json:"hold,omitempty"`
-	LastEvent         time.Time   `json:"last_event,omitempty"`
+	ID                int64              `json:"id"`
+	ParentID          int64              `json:"parent_id,omitempty"`
+	Kind              string             `json:"kind"`
+	Intent            string             `json:"intent,omitempty"`
+	RuleText          string             `json:"rule_text,omitempty"`
+	Acceptance        *Acceptance        `json:"acceptance,omitempty"`
+	Envelope          *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	After             []int64            `json:"after,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	CreatedBy         string             `json:"created_by"`
+	CompletedAt       time.Time          `json:"completed_at,omitempty"`
+	CompletedEvidence string             `json:"completed_evidence_id,omitempty"`
+	CanceledAt        time.Time          `json:"canceled_at,omitempty"`
+	CanceledReason    string             `json:"canceled_reason,omitempty"`
+	Claim             *Claim             `json:"claim,omitempty"`
+	Hold              *Hold              `json:"hold,omitempty"`
+	LastEvent         time.Time          `json:"last_event,omitempty"`
 }
 
 type ChildBrief struct {
@@ -479,6 +481,7 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 	v.RecentRunsMeta = collectionMeta(len(n.Runs), len(v.RecentRuns))
 	v.RecentEvidence = recentEvidenceForNode(n, cfg.BriefMaxRecent)
 	v.RecentEvidenceMeta = collectionMeta(len(n.Evidences), len(v.RecentEvidence))
+	v.LatestContextDrift = latestEvidenceOfKind(n, EvidenceContextDrift)
 	for _, r := range s.InheritedRules(id) {
 		v.InheritedRules = append(v.InheritedRules, &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText})
 	}
@@ -493,6 +496,7 @@ func buildNodeDetail(n *Node) *NodeDetail {
 		Intent:     n.Intent,
 		RuleText:   n.RuleText,
 		Acceptance: n.Acceptance,
+		Envelope:   cloneExecutionEnvelope(n.Envelope),
 		After:      append([]int64(nil), n.After...),
 		CreatedAt:  n.CreatedAt,
 		CreatedBy:  n.CreatedBy,
@@ -511,6 +515,16 @@ func buildNodeDetail(n *Node) *NodeDetail {
 		d.CanceledReason = n.CanceledReason
 	}
 	return d
+}
+
+func latestEvidenceOfKind(n *Node, kind string) *EvidenceRecord {
+	for i := len(n.Evidences) - 1; i >= 0; i-- {
+		if n.Evidences[i].Kind == kind {
+			rec := n.Evidences[i]
+			return &rec
+		}
+	}
+	return nil
 }
 
 func recentRunsForNode(n *Node, limit int) []ScriptRunRecord {
@@ -558,6 +572,10 @@ func RenderShowText(w io.Writer, v ShowView) {
 	}
 	if len(n.After) > 0 {
 		fmt.Fprintf(w, "after: %s\n", joinIDs(n.After))
+	}
+	if n.Envelope != nil {
+		fmt.Fprintf(w, "execution envelope: exec_cwd=%s surface=%s scope=%s\n",
+			n.Envelope.ExecCWD, firstNonEmpty(n.Envelope.ExecSurface, ExecSurfaceShared), strings.Join(n.Envelope.OwnedPaths, ","))
 	}
 	if n.Claim != nil {
 		attempt := ""
@@ -609,6 +627,9 @@ func RenderShowText(w io.Writer, v ShowView) {
 		for _, e := range v.RecentEvidence {
 			fmt.Fprintf(w, "  %s kind=%s %s\n", e.EventID, e.Kind, e.Summary)
 		}
+	}
+	if v.LatestContextDrift != nil {
+		fmt.Fprintf(w, "latest context drift: %s %s\n", v.LatestContextDrift.EventID, v.LatestContextDrift.Summary)
 	}
 }
 
