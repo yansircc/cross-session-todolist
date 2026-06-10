@@ -150,6 +150,8 @@ cst add  --parent <id> --rule "Invariant or context visible to agents"
 cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--after <id> ... | --clear-after] [--reason "..."]
 
 cst brief [--within <id>] [--history]
+cst claims [--within <id>]
+cst recover [--within <id>]
 cst show <id>
 cst events --for <id>
 cst events --attempt <attempt-id>
@@ -161,9 +163,12 @@ cst take [<task-id>]
 cst release <task-id>
 cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
 cst hold <task-id> --clear
-cst run <task-id> [--check <name>] [--cmd "..."]
+cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
+cst run <task-id> --exec-cwd <checkout-root> --acceptance
 cst evidence <id> --kind <kind> --summary "..." [--data JSON]
 cst evidence <id> --kind note --summary "Process note..."
+cst done <task-id> [--exec-cwd <checkout-root>]
+cst done <task-id> --from-acceptance <acceptance-run-set-evidence-id>
 cst done <task-id> [--evidence <event-id> | --note "..."]
 cst cancel <id> --reason "..."
 ```
@@ -184,7 +189,7 @@ cst done 2
 
 Use repeatable `--check <name=cmd>` when acceptance has multiple named checks.
 `done` runs each check in declaration order, records one `script_run` per check,
-and stops at the first failed check without completing the task.
+and completes only when every check exits 0.
 
 ```sh
 cst add --parent 1 --intent "Fix parser" \
@@ -194,8 +199,27 @@ cst take 2
 cst done 2
 ```
 
-Verify acceptance uses the successful acceptance run as completion evidence. It rejects
-manual `--note` and `--evidence` so evidence cannot be silently ignored.
+Verify acceptance records successful `script_run(trigger=acceptance)` events,
+then records one `evidence_recorded(kind=acceptance_run_set)` that explicitly
+maps each declared check to the script_run event that satisfied it.
+`task_completed.evidence_id` points to that run-set evidence, not to the last
+script run. Completion replays the run-set and rejects missing checks, failed
+runs, mixed execution contexts, stale acceptance digests, and manual `--note` or
+ordinary `--evidence` on verify tasks.
+
+Worker checkouts must separate ledger identity from execution identity:
+
+```sh
+cst --store /central/repo run 12 --exec-cwd /worker/repo --acceptance
+cst --store /central/repo done 12 --from-acceptance <acceptance-run-set-evidence-id>
+```
+
+`--store` chooses the CST ledger owner. `--exec-cwd` chooses the checkout where
+the shell command runs. They are independent axes. Events record `store_id`
+(the root `node_created.event_id`), `exec_cwd`, git head/branch/status, staged
+diff hash, unstaged diff hash, untracked manifest hash, and full stdout/stderr
+artifact references. They do not record absolute `store_root` as ledger
+identity.
 
 `--review <who>` means `done` requires evidence or a note.
 
@@ -288,9 +312,14 @@ For review acceptance, `--note` creates `evidence_recorded(kind=note)` and compl
 in one transaction.
 
 For verify acceptance, `done` records successful `script_run(trigger=acceptance)`
-events as completion evidence. `cst run` records `script_run(trigger=probe)`
-without changing status. If a task has multiple verify checks, `cst run <id>
---check <name>` selects one probe check.
+events and an `acceptance_run_set` evidence, then completes with that run-set as
+the completion evidence. `cst run` records `script_run(trigger=probe)` without
+changing status. If a task has multiple verify checks, `cst run <id> --check
+<name>` selects one probe check.
+
+Each `script_run` keeps bounded `stdout_head` / `stderr_head` for projections.
+Full non-empty stdout/stderr is written under `.cst/artifacts/runs/` and the
+event stores relative artifact path, sha256, and byte size.
 
 ## Tree Correction
 
@@ -390,12 +419,21 @@ Projection commands return a consistent snapshot at their reported `revision`.
 Concurrent writes after that snapshot are not reflected; re-run `cst brief` after
 any mutation or confusing claim state.
 
+## Claims And Recovery
+
+`cst claims [--within <id>]` and `cst recover [--within <id>]` are read-only
+operator projections. They list current claim holder, task, attempt id, lease
+expiry, stale status, and latest execution identity observed for that attempt.
+They do not auto-release claims. The next mutating command performs normal
+expired-lease repair through the append-only ledger.
+
 ## Storage
 
 ```txt
 .cst/events.jsonl   append-only event log; source of truth
 .cst/events.lock    advisory transaction lock; do not track as task state
 .cst/config.toml    optional budgets, timeouts, lease TTL, actor default
+.cst/artifacts/     hash-checked run witness attachments referenced by events
 ```
 
 State is rebuilt by replaying `events.jsonl` through a checked reducer on every

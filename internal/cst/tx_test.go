@@ -426,7 +426,11 @@ func TestRenewRequiresOriginalLeaseID(t *testing.T) {
 	if err := DoTake(io.Discard, 2, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := renewClaimUnderLock("alice", 2, oldLease, time.Hour); err == nil {
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renewClaimUnderLock(paths, "alice", 2, oldLease, time.Hour); err == nil {
 		t.Fatal("old lease renewed a newer claim")
 	}
 	for _, ev := range replayEvents(t) {
@@ -531,8 +535,8 @@ func TestNamedVerifyCheckFailureRecordsFailedCheck(t *testing.T) {
 		Parent: 1,
 		Intent: "task",
 		VerifyChecks: []VerifyCheck{
-			{Name: "unit", Cmd: "true"},
-			{Name: "lint", Cmd: "false"},
+			{Name: "unit", Cmd: "false"},
+			{Name: "lint", Cmd: "true"},
 		},
 	}, false); err != nil {
 		t.Fatal(err)
@@ -555,10 +559,14 @@ func TestNamedVerifyCheckFailureRecordsFailedCheck(t *testing.T) {
 		t.Fatal("failed check should not complete task")
 	}
 	if len(task.Runs) != 2 {
-		t.Fatalf("expected pass check plus failed check, got %+v", task.Runs)
+		t.Fatalf("expected failed check plus later check, got %+v", task.Runs)
 	}
-	last := task.Runs[len(task.Runs)-1]
-	if last.CheckName != "lint" || last.ExitCode == 0 || last.AttemptID != attemptID {
-		t.Fatalf("failed check not recorded structurally: %+v", last)
+	first := task.Runs[0]
+	if first.CheckName != "unit" || first.ExitCode == 0 || first.AttemptID != attemptID {
+		t.Fatalf("failed check not recorded structurally: %+v", first)
+	}
+	second := task.Runs[1]
+	if second.CheckName != "lint" || second.ExitCode != 0 || second.AttemptID != attemptID {
+		t.Fatalf("later check should still run: %+v", second)
 	}
 }

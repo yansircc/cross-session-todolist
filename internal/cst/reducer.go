@@ -111,16 +111,20 @@ func (s *State) applyOne(e *Event) error {
 			}
 		}
 		n := &Node{
-			ID:         e.NodeID,
-			ParentID:   e.ParentID,
-			Kind:       e.Kind,
-			Intent:     e.Intent,
-			RuleText:   e.RuleText,
-			Acceptance: e.Acceptance,
-			After:      append([]int64(nil), e.After...),
-			CreatedAt:  e.Timestamp,
-			CreatedBy:  e.Actor,
-			LastEvent:  e.Timestamp,
+			ID:             e.NodeID,
+			ParentID:       e.ParentID,
+			Kind:           e.Kind,
+			Intent:         e.Intent,
+			RuleText:       e.RuleText,
+			Acceptance:     e.Acceptance,
+			After:          append([]int64(nil), e.After...),
+			CreatedAt:      e.Timestamp,
+			CreatedBy:      e.Actor,
+			CreatedEventID: e.EventID,
+			LastEvent:      e.Timestamp,
+		}
+		if e.Kind == KindTask && e.Acceptance != nil {
+			n.AcceptanceEventAt = e.Timestamp
 		}
 		s.Nodes[n.ID] = n
 		s.Order = append(s.Order, n.ID)
@@ -173,6 +177,7 @@ func (s *State) applyOne(e *Event) error {
 				return err
 			}
 			n.Acceptance = e.Acceptance
+			n.AcceptanceEventAt = e.Timestamp
 		}
 		if e.AfterSet {
 			if n.Kind != KindTask {
@@ -337,20 +342,39 @@ func (s *State) applyOne(e *Event) error {
 		if err := s.applyAttemptEvent(e, false); err != nil {
 			return err
 		}
+		gitAvailable := false
+		if e.GitAvailable != nil {
+			gitAvailable = *e.GitAvailable
+		}
 		n.Runs = append(n.Runs, ScriptRunRecord{
-			EventID:    e.EventID,
-			NodeID:     e.NodeID,
-			AttemptID:  e.AttemptID,
-			Trigger:    e.Trigger,
-			CheckName:  e.CheckName,
-			Cmd:        e.Cmd,
-			ExitCode:   e.ExitCode,
-			DurationMs: e.DurationMs,
-			StdoutHead: e.StdoutHead,
-			StderrHead: e.StderrHead,
-			Truncated:  e.Truncated,
-			Actor:      e.Actor,
-			At:         e.Timestamp,
+			EventID:                 e.EventID,
+			NodeID:                  e.NodeID,
+			AttemptID:               e.AttemptID,
+			Trigger:                 e.Trigger,
+			CheckName:               e.CheckName,
+			Cmd:                     e.Cmd,
+			ExitCode:                e.ExitCode,
+			DurationMs:              e.DurationMs,
+			StdoutHead:              e.StdoutHead,
+			StderrHead:              e.StderrHead,
+			Truncated:               e.Truncated,
+			StoreID:                 e.StoreID,
+			ExecCWD:                 e.ExecCWD,
+			GitAvailable:            gitAvailable,
+			GitRoot:                 e.GitRoot,
+			GitHead:                 e.GitHead,
+			GitBranch:               e.GitBranch,
+			GitStatusShort:          e.GitStatusShort,
+			StagedDiffSHA256:        e.StagedDiffSHA256,
+			UnstagedDiffSHA256:      e.UnstagedDiffSHA256,
+			UntrackedManifestSHA256: e.UntrackedManifestSHA256,
+			GitIdentityDigest:       e.GitIdentityDigest,
+			ParallelWorktree:        e.ParallelWorktree,
+			ExecContextDigest:       e.ExecContextDigest,
+			StdoutArtifact:          e.StdoutArtifact,
+			StderrArtifact:          e.StderrArtifact,
+			Actor:                   e.Actor,
+			At:                      e.Timestamp,
 		})
 		evidence := EvidenceRecord{
 			EventID:   e.EventID,
@@ -380,6 +404,11 @@ func (s *State) applyOne(e *Event) error {
 		}
 		if e.EvidenceKind == EvidenceVerifierContract {
 			if err := validateVerifierContractEvidence(e.EvidenceData); err != nil {
+				return err
+			}
+		}
+		if e.EvidenceKind == EvidenceAcceptanceRunSet {
+			if _, err := parseAcceptanceRunSetData(e.EvidenceData); err != nil {
 				return err
 			}
 		}
@@ -598,6 +627,12 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 	}
 	switch n.Acceptance.Kind {
 	case AcceptanceVerify:
+		if e.EvidenceID != "" {
+			rec := s.EvidenceIDs[e.EvidenceID]
+			if rec.Kind == EvidenceAcceptanceRunSet {
+				return s.validateAcceptanceRunSetCompletion(n, e, rec)
+			}
+		}
 		for _, check := range n.Acceptance.VerifyChecks() {
 			matched := false
 			for i := len(n.Runs) - 1; i >= 0; i-- {
@@ -624,6 +659,56 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 		}
 	default:
 		return fmt.Errorf("task_completed #%d has unknown acceptance kind %q", n.ID, n.Acceptance.Kind)
+	}
+	return nil
+}
+
+func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec EvidenceRecord) error {
+	data, err := parseAcceptanceRunSetData(rec.Data)
+	if err != nil {
+		return err
+	}
+	checks := n.Acceptance.VerifyChecks()
+	if data.AcceptanceDigest != acceptanceDigest(checks) {
+		return fmt.Errorf("task_completed #%d acceptance_run_set digest mismatch", n.ID)
+	}
+	if !n.AcceptanceEventAt.IsZero() && n.AcceptanceEventAt.After(rec.At) {
+		return fmt.Errorf("task_completed #%d uses acceptance_run_set before latest acceptance revision", n.ID)
+	}
+	if len(data.Checks) != len(checks) {
+		return fmt.Errorf("task_completed #%d acceptance_run_set covers %d checks, want %d", n.ID, len(data.Checks), len(checks))
+	}
+	runs := map[string]ScriptRunRecord{}
+	for _, run := range n.Runs {
+		runs[run.EventID] = run
+	}
+	for i, expected := range checks {
+		actual := data.Checks[i]
+		if actual.Name != expected.Name || actual.Cmd != expected.Cmd {
+			return fmt.Errorf("task_completed #%d acceptance_run_set check[%d] mismatch", n.ID, i)
+		}
+		run, ok := runs[actual.ScriptRunEventID]
+		if !ok {
+			return fmt.Errorf("task_completed #%d acceptance_run_set references missing run %s", n.ID, actual.ScriptRunEventID)
+		}
+		if run.NodeID != n.ID {
+			return fmt.Errorf("task_completed #%d run %s belongs to #%d", n.ID, run.EventID, run.NodeID)
+		}
+		if run.Trigger != TriggerAcceptance {
+			return fmt.Errorf("task_completed #%d run %s trigger=%s", n.ID, run.EventID, run.Trigger)
+		}
+		if run.ExitCode != 0 {
+			return fmt.Errorf("task_completed #%d run %s exit=%d", n.ID, run.EventID, run.ExitCode)
+		}
+		if normalizedCheckName(run.CheckName) != expected.Name || run.Cmd != expected.Cmd {
+			return fmt.Errorf("task_completed #%d run %s does not match check %s", n.ID, run.EventID, expected.Name)
+		}
+		if complete.AttemptID == "" || run.AttemptID != complete.AttemptID || rec.AttemptID != complete.AttemptID {
+			return fmt.Errorf("task_completed #%d acceptance_run_set attempt mismatch", n.ID)
+		}
+		if execContextDigestFromRun(run) != data.ExecContextDigest {
+			return fmt.Errorf("task_completed #%d run %s exec context mismatch", n.ID, run.EventID)
+		}
 	}
 	return nil
 }

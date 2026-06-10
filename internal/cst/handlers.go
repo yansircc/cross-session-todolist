@@ -46,8 +46,17 @@ type AddArgs struct {
 }
 
 type DoneArgs struct {
-	EvidenceID string
-	Note       string
+	EvidenceID       string
+	Note             string
+	FromAcceptanceID string
+	ExecCWD          string
+}
+
+type RunArgs struct {
+	Override   string
+	CheckName  string
+	Acceptance bool
+	ExecCWD    string
 }
 
 type EvidenceArgs struct {
@@ -353,11 +362,17 @@ func DoRelease(out io.Writer, id int64, asJSON bool) error {
 // If the caller holds the claim, the lease is renewed periodically while the
 // command runs.
 func DoRun(out io.Writer, id int64, override string, checkName string, asJSON bool) error {
+	return DoRunWithArgs(out, id, RunArgs{Override: override, CheckName: checkName}, asJSON)
+}
+
+func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 	var (
 		cmdToRun string
 		label    string
 		leaseID  string
 		cfg      Config
+		paths    StorePaths
+		storeID  string
 	)
 	err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
 		n, err := tx.requireOpenTask(id)
@@ -365,18 +380,26 @@ func DoRun(out io.Writer, id int64, override string, checkName string, asJSON bo
 			return err
 		}
 		cfg = tx.cfg
+		paths = tx.StorePaths()
+		storeID = tx.StoreID()
 		if n.Claim != nil && n.Claim.Actor == tx.actor {
 			leaseID = n.Claim.LeaseID
 		}
-		if override != "" {
-			cmdToRun = override
-			label = checkName
+		if args.Acceptance {
+			if args.Override != "" || args.CheckName != "" {
+				return herr(ExitUsage, "run --acceptance cannot be combined with --cmd or --check")
+			}
+			return nil
+		}
+		if args.Override != "" {
+			cmdToRun = args.Override
+			label = args.CheckName
 			return nil
 		}
 		if n.Acceptance == nil || n.Acceptance.Kind != AcceptanceVerify {
 			return herr(ExitUsage, "task #%d has no verify acceptance; pass --cmd", id)
 		}
-		check, err := selectVerifyCheck(n.Acceptance.VerifyChecks(), checkName)
+		check, err := selectVerifyCheck(n.Acceptance.VerifyChecks(), args.CheckName)
 		if err != nil {
 			return err
 		}
@@ -387,20 +410,27 @@ func DoRun(out io.Writer, id int64, override string, checkName string, asJSON bo
 	if err != nil {
 		return err
 	}
+	if args.Acceptance {
+		return runAcceptanceWithoutCompletion(out, id, args.ExecCWD, asJSON)
+	}
 
 	actor := ResolveActor(cfg.ActorDefault)
 	var renew LeaseRenewer
 	if leaseID != "" {
 		renew = func(t time.Time) error {
-			return renewClaimUnderLock(actor, id, leaseID, cfg.ClaimLeaseTTL)
+			return renewClaimUnderLock(paths, actor, id, leaseID, cfg.ClaimLeaseTTL)
 		}
 	}
 	res := runScript(cfg, RunOpts{
-		Cmd:        cmdToRun,
-		Trigger:    TriggerProbe,
-		CheckName:  label,
-		Renew:      renew,
-		RenewEvery: cfg.ClaimRenewEvery,
+		EventID:     NewEventID(),
+		Cmd:         cmdToRun,
+		Trigger:     TriggerProbe,
+		CheckName:   label,
+		ExecCWD:     args.ExecCWD,
+		StoreID:     storeID,
+		ArtifactDir: paths.RunArtifactsDir(),
+		Renew:       renew,
+		RenewEvery:  cfg.ClaimRenewEvery,
 	})
 
 	if err := WithStore(TxOpts{Mutating: true, RepairLease: false}, func(tx *Tx) error {
@@ -412,6 +442,9 @@ func DoRun(out io.Writer, id int64, override string, checkName string, asJSON bo
 	emitRun(out, asJSON, id, res)
 	if res.ExitCode != 0 {
 		return &HandlerError{Code: ExitAcceptanceFail, Msg: fmt.Sprintf("script exit=%d", res.ExitCode)}
+	}
+	if res.ArtifactError != nil {
+		return res.ArtifactError
 	}
 	return nil
 }
@@ -447,6 +480,17 @@ func emitRuns(out io.Writer, asJSON bool, id int64, results []RunResult) {
 	}
 }
 
+func emitAcceptanceRunSet(out io.Writer, asJSON bool, id int64, evidence *Event, results []RunResult) {
+	if asJSON {
+		WriteJSON(out, struct {
+			Evidence *Event      `json:"evidence"`
+			Runs     []RunResult `json:"runs,omitempty"`
+		}{evidence, results})
+		return
+	}
+	fmt.Fprintf(out, "#%d acceptance_run_set evidence=%s\n", id, evidence.EventID)
+}
+
 func selectVerifyCheck(checks []VerifyCheck, name string) (VerifyCheck, error) {
 	if len(checks) == 0 {
 		return VerifyCheck{}, herr(ExitInvariantBroken, "verify acceptance has no checks")
@@ -465,22 +509,38 @@ func selectVerifyCheck(checks []VerifyCheck, name string) (VerifyCheck, error) {
 	return VerifyCheck{}, herr(ExitNotFound, "verify check %q not found", name)
 }
 
-func runVerifyChecks(cfg Config, checks []VerifyCheck, renew LeaseRenewer) []RunResult {
+type verifyRunContext struct {
+	ExecCWD     string
+	StoreID     string
+	ArtifactDir string
+}
+
+func runVerifyChecks(cfg Config, checks []VerifyCheck, renew LeaseRenewer, runCtx verifyRunContext) []RunResult {
 	results := make([]RunResult, 0, len(checks))
 	for _, check := range checks {
 		res := runScript(cfg, RunOpts{
-			Cmd:        check.Cmd,
-			Trigger:    TriggerAcceptance,
-			CheckName:  check.Name,
-			Renew:      renew,
-			RenewEvery: cfg.ClaimRenewEvery,
+			EventID:     NewEventID(),
+			Cmd:         check.Cmd,
+			Trigger:     TriggerAcceptance,
+			CheckName:   check.Name,
+			ExecCWD:     runCtx.ExecCWD,
+			StoreID:     runCtx.StoreID,
+			ArtifactDir: runCtx.ArtifactDir,
+			Renew:       renew,
+			RenewEvery:  cfg.ClaimRenewEvery,
 		})
 		results = append(results, res)
-		if res.ExitCode != 0 {
-			break
-		}
 	}
 	return results
+}
+
+func firstArtifactError(results []RunResult) error {
+	for _, result := range results {
+		if result.ArtifactError != nil {
+			return result.ArtifactError
+		}
+	}
+	return nil
 }
 
 func firstFailedRun(results []RunResult) *RunResult {
@@ -503,6 +563,95 @@ func recordScriptRunsOnly(id int64, results []RunResult) error {
 	})
 }
 
+func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJSON bool) error {
+	var (
+		guard   CompletionGuard
+		cfg     Config
+		paths   StorePaths
+		storeID string
+	)
+	if err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+		g, err := tx.PrepareCompletionGuard(id)
+		if err != nil {
+			return err
+		}
+		if g.AcceptanceKind != AcceptanceVerify {
+			return herr(ExitUsage, "run --acceptance is only valid for verify acceptance")
+		}
+		guard = g
+		cfg = tx.cfg
+		paths = tx.StorePaths()
+		storeID = tx.StoreID()
+		return nil
+	}); err != nil {
+		return err
+	}
+	actor := ResolveActor(cfg.ActorDefault)
+	var renew LeaseRenewer
+	if guard.ClaimLeaseID != "" {
+		renew = func(t time.Time) error {
+			return renewClaimUnderLock(paths, actor, id, guard.ClaimLeaseID, cfg.ClaimLeaseTTL)
+		}
+	}
+	results := runVerifyChecks(cfg, guard.VerifyChecks, renew, verifyRunContext{
+		ExecCWD:     execCWD,
+		StoreID:     storeID,
+		ArtifactDir: paths.RunArtifactsDir(),
+	})
+	failed := firstFailedRun(results)
+	artifactErr := firstArtifactError(results)
+	if failed != nil || artifactErr != nil {
+		_ = recordScriptRunsOnly(id, results)
+		emitRuns(out, asJSON, id, results)
+		if artifactErr != nil {
+			return artifactErr
+		}
+		return &HandlerError{Code: ExitAcceptanceFail,
+			Msg: fmt.Sprintf("acceptance failed (check=%s exit=%d)", normalizedCheckName(failed.CheckName), failed.ExitCode)}
+	}
+	var evidence *Event
+	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+		current, err := tx.PrepareCompletionGuard(id)
+		if err != nil {
+			return err
+		}
+		if !sameCompletionGuard(guard, current) {
+			return herr(ExitClaimConflict, "task #%d claim or acceptance changed under acceptance run", id)
+		}
+		runEvents := make([]*Event, 0, len(results))
+		for _, result := range results {
+			ev, err := tx.RecordScriptRun(id, result)
+			if err != nil {
+				return err
+			}
+			runEvents = append(runEvents, ev)
+		}
+		ev, err := tx.RecordAcceptanceRunSet(id, guard.VerifyChecks, runEvents)
+		if err != nil {
+			return err
+		}
+		evidence = ev
+		return nil
+	})
+	if err != nil {
+		if isHandlerErr(err) {
+			_ = recordScriptRunsOnly(id, results)
+		}
+		emitRuns(out, asJSON, id, results)
+		return err
+	}
+	emitAcceptanceRunSet(out, asJSON, id, evidence, results)
+	return nil
+}
+
+func sameCompletionGuard(a, b CompletionGuard) bool {
+	return a.NodeID == b.NodeID &&
+		a.AcceptanceKind == b.AcceptanceKind &&
+		a.ClaimLeaseID == b.ClaimLeaseID &&
+		a.ClaimAttemptID == b.ClaimAttemptID &&
+		sameVerifyChecks(a.VerifyChecks, b.VerifyChecks)
+}
+
 // DoDone completes a task. It is the only path that writes task_completed.
 // For verify acceptances, it executes outside the lock and re-validates under a
 // fresh transaction before committing — closing the TOCTOU window where
@@ -511,9 +660,14 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	if args.EvidenceID != "" && args.Note != "" {
 		return herr(ExitUsage, "use only one of --evidence / --note")
 	}
+	if args.FromAcceptanceID != "" && (args.EvidenceID != "" || args.Note != "" || args.ExecCWD != "") {
+		return herr(ExitUsage, "--from-acceptance cannot be combined with --evidence, --note, or --exec-cwd")
+	}
 	var (
-		guard CompletionGuard
-		cfg   Config
+		guard   CompletionGuard
+		cfg     Config
+		paths   StorePaths
+		storeID string
 	)
 	// Phase 1: validate, capture guard, release lock.
 	err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
@@ -523,6 +677,8 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		}
 		guard = g
 		cfg = tx.cfg
+		paths = tx.StorePaths()
+		storeID = tx.StoreID()
 		return nil
 	})
 	if err != nil {
@@ -531,6 +687,25 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	if guard.AcceptanceKind == AcceptanceVerify && (args.EvidenceID != "" || args.Note != "") {
 		return herr(ExitUsage,
 			"verify acceptance records the successful acceptance run as evidence; do not pass --evidence or --note")
+	}
+	if args.FromAcceptanceID != "" {
+		if guard.AcceptanceKind != AcceptanceVerify {
+			return herr(ExitUsage, "--from-acceptance is only valid for verify acceptance")
+		}
+		var emitted *Event
+		err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+			ev, err := tx.CompleteTask(guard, args.FromAcceptanceID)
+			if err != nil {
+				return err
+			}
+			emitted = ev
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		emitDone(out, asJSON, emitted, nil)
+		return nil
 	}
 
 	// Non-shell acceptances complete inside one fresh transaction.
@@ -564,32 +739,53 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	var renew LeaseRenewer
 	if guard.ClaimLeaseID != "" {
 		renew = func(t time.Time) error {
-			return renewClaimUnderLock(actor, id, guard.ClaimLeaseID, cfg.ClaimLeaseTTL)
+			return renewClaimUnderLock(paths, actor, id, guard.ClaimLeaseID, cfg.ClaimLeaseTTL)
 		}
 	}
-	results := runVerifyChecks(cfg, guard.VerifyChecks, renew)
+	results := runVerifyChecks(cfg, guard.VerifyChecks, renew, verifyRunContext{
+		ExecCWD:     args.ExecCWD,
+		StoreID:     storeID,
+		ArtifactDir: paths.RunArtifactsDir(),
+	})
 	failed := firstFailedRun(results)
+	artifactErr := firstArtifactError(results)
 
 	// Phase 3: under a fresh tx, always record the runs, complete only if
 	// acceptance passed AND guard preconditions still hold.
-	if failed != nil {
+	if failed != nil || artifactErr != nil {
 		_ = recordScriptRunsOnly(id, results)
 		emitRuns(out, asJSON, id, results)
+		if artifactErr != nil {
+			return artifactErr
+		}
 		return &HandlerError{Code: ExitAcceptanceFail,
 			Msg: fmt.Sprintf("acceptance failed (check=%s exit=%d)", normalizedCheckName(failed.CheckName), failed.ExitCode)}
 	}
 
 	var emitted *Event
-	var lastRunEvent *Event
+	var runSetEvent *Event
 	err = WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+		current, err := tx.PrepareCompletionGuard(id)
+		if err != nil {
+			return err
+		}
+		if !sameCompletionGuard(guard, current) {
+			return herr(ExitClaimConflict, "task #%d claim or acceptance changed under acceptance run", id)
+		}
+		runEvents := make([]*Event, 0, len(results))
 		for _, result := range results {
 			ev, err := tx.RecordScriptRun(id, result)
 			if err != nil {
 				return err
 			}
-			lastRunEvent = ev
+			runEvents = append(runEvents, ev)
 		}
-		ev, err := tx.CompleteTask(guard, lastRunEvent.EventID)
+		ev, err := tx.RecordAcceptanceRunSet(id, guard.VerifyChecks, runEvents)
+		if err != nil {
+			return err
+		}
+		runSetEvent = ev
+		ev, err = tx.CompleteTask(guard, runSetEvent.EventID)
 		if err != nil {
 			return err
 		}

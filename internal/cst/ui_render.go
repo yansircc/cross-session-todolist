@@ -269,13 +269,13 @@ func taskAttemptID(t *Node) string {
 func renderTaskNote(sb *strings.Builder, t *Node) {
 	// Pick the evidence referenced by task_completed if it's a real note
 	// (review acceptance). For verify acceptance, the completion points at a
-	// script_run record that we surface separately in the verify line, so we
-	// instead reach for the most recent non-script_run evidence (the Agent's
-	// own note, if any).
+	// machine witness (script_run on legacy stores, acceptance_run_set on new
+	// stores) that we surface separately, so we instead reach for the most
+	// recent human evidence (the Agent's own note, if any).
 	var ev *EvidenceRecord
 	if t.CompletedEvidence != "" {
 		for i := range t.Evidences {
-			if t.Evidences[i].EventID == t.CompletedEvidence && t.Evidences[i].Kind != EvidenceScript {
+			if t.Evidences[i].EventID == t.CompletedEvidence && isHumanEvidenceKind(t.Evidences[i].Kind) {
 				ev = &t.Evidences[i]
 				break
 			}
@@ -283,7 +283,7 @@ func renderTaskNote(sb *strings.Builder, t *Node) {
 	}
 	if ev == nil {
 		for i := len(t.Evidences) - 1; i >= 0; i-- {
-			if t.Evidences[i].Kind != EvidenceScript {
+			if isHumanEvidenceKind(t.Evidences[i].Kind) {
 				ev = &t.Evidences[i]
 				break
 			}
@@ -300,6 +300,10 @@ func renderTaskNote(sb *strings.Builder, t *Node) {
 	if len(ev.Data) > 0 && string(ev.Data) != "null" {
 		renderEvidenceData(sb, ev.Data)
 	}
+}
+
+func isHumanEvidenceKind(kind string) bool {
+	return kind != EvidenceScript && kind != EvidenceAcceptanceRunSet
 }
 
 func renderEvidenceData(sb *strings.Builder, raw json.RawMessage) {

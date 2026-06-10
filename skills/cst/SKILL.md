@@ -29,6 +29,7 @@ need completed child subtrees or historical recent runs/failures.
 If claims exist, inspect them:
 
 ```sh
+cst claims
 cst show <task-id>
 ```
 
@@ -63,6 +64,27 @@ cst take
    ```
 
 Stop only when `cst brief` reports the root as `completed` and no claims remain.
+
+## Boundary Identity
+
+Do not let process cwd imply identity across a session or worker boundary.
+
+- `--store <repo-root>` selects the central CST ledger owner.
+- `--exec-cwd <checkout-root>` selects where shell commands run.
+- Events record `store_id` (root `node_created.event_id`), `exec_cwd`, git
+  checkout identity, diff hashes, and full log artifact references. They do not
+  record absolute `store_root` as durable identity.
+
+Worker acceptance flow:
+
+```sh
+cst --store /central/repo run 12 --exec-cwd /worker/repo --acceptance
+cst --store /central/repo done 12 --from-acceptance <acceptance-run-set-evidence-id>
+```
+
+For verify tasks, ordinary `--note` / `--evidence` completion is still invalid.
+Completion evidence must be `acceptance_run_set`, which explicitly maps every
+declared check to the successful `script_run` event that satisfied it.
 
 ## Modeling
 
@@ -140,6 +162,10 @@ and completion from the same claim carry that id. Inspect one attempt with:
 ```sh
 cst events --attempt <attempt-id>
 ```
+
+Use `cst claims` or `cst recover` when a session restarts or multiple agents
+have touched the store. They are read-only views: actor, task, attempt, lease
+staleness, and latest execution identity. They do not auto-release stale claims.
 
 Do not infer workstream scope from `attempt_id`; use explicit `--parent` and
 `--within`.

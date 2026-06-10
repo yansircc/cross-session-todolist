@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,21 +17,106 @@ const StoreDirName = ".cst"
 const eventsFile = "events.jsonl"
 const lockFile = "events.lock"
 
+type StorePaths struct {
+	Root       string
+	StoreDir   string
+	EventsPath string
+	LockPath   string
+}
+
+var storeRootMu sync.RWMutex
+var configuredStoreRoot string
+
+func SetStoreRoot(root string) error {
+	if root == "" {
+		storeRootMu.Lock()
+		configuredStoreRoot = ""
+		storeRootMu.Unlock()
+		return nil
+	}
+	paths, err := ResolveStorePaths(root)
+	if err != nil {
+		return err
+	}
+	storeRootMu.Lock()
+	configuredStoreRoot = paths.Root
+	storeRootMu.Unlock()
+	return nil
+}
+
+func ResolveStorePaths(root string) (StorePaths, error) {
+	if root == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return StorePaths{}, err
+		}
+		root = cwd
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return StorePaths{}, err
+	}
+	storeDir := filepath.Join(abs, StoreDirName)
+	return StorePaths{
+		Root:       abs,
+		StoreDir:   storeDir,
+		EventsPath: filepath.Join(storeDir, eventsFile),
+		LockPath:   filepath.Join(storeDir, lockFile),
+	}, nil
+}
+
+func CurrentStorePaths() (StorePaths, error) {
+	storeRootMu.RLock()
+	root := configuredStoreRoot
+	storeRootMu.RUnlock()
+	return ResolveStorePaths(root)
+}
+
+func (p StorePaths) RunArtifactsDir() string {
+	return filepath.Join(p.StoreDir, "artifacts", "runs")
+}
+
 func StoreDir() string {
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, StoreDirName)
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return StoreDirName
+	}
+	return paths.StoreDir
 }
 
 func EnsureStoreDir() (string, error) {
-	dir := StoreDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	paths, err := CurrentStorePaths()
+	if err != nil {
 		return "", err
 	}
-	return dir, nil
+	if err := os.MkdirAll(paths.StoreDir, 0o755); err != nil {
+		return "", err
+	}
+	return paths.StoreDir, nil
 }
 
-func EventsPath() string { return filepath.Join(StoreDir(), eventsFile) }
-func LockPath() string   { return filepath.Join(StoreDir(), lockFile) }
+func EnsureStoreDirAt(paths StorePaths) (string, error) {
+	if err := os.MkdirAll(paths.StoreDir, 0o755); err != nil {
+		return "", err
+	}
+	return paths.StoreDir, nil
+}
+
+func EventsPath() string {
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return filepath.Join(StoreDirName, eventsFile)
+	}
+	return paths.EventsPath
+}
+
+func LockPath() string {
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return filepath.Join(StoreDirName, lockFile)
+	}
+	return paths.LockPath
+}
 
 // Lock holds an OS-level advisory lock for the entire store. Used by any
 // command that mutates events or needs a coherent replay snapshot.
@@ -39,10 +125,18 @@ type Lock struct {
 }
 
 func AcquireLock() (*Lock, error) {
-	if _, err := EnsureStoreDir(); err != nil {
+	paths, err := CurrentStorePaths()
+	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(LockPath(), os.O_CREATE|os.O_RDWR, 0o644)
+	return AcquireLockAt(paths)
+}
+
+func AcquireLockAt(paths StorePaths) (*Lock, error) {
+	if _, err := EnsureStoreDirAt(paths); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(paths.LockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -65,13 +159,21 @@ func (l *Lock) Release() error {
 // must hold a Lock from AcquireLock to prevent interleaving from concurrent
 // writers.
 func Append(events ...*Event) error {
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return err
+	}
+	return AppendAt(paths, events...)
+}
+
+func AppendAt(paths StorePaths, events ...*Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	if _, err := EnsureStoreDir(); err != nil {
+	if _, err := EnsureStoreDirAt(paths); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(EventsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(paths.EventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
@@ -91,7 +193,15 @@ func Append(events ...*Event) error {
 // Replay streams every event in append order. Empty file returns no events
 // and no error.
 func Replay() ([]*Event, error) {
-	f, err := os.Open(EventsPath())
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return nil, err
+	}
+	return ReplayAt(paths)
+}
+
+func ReplayAt(paths StorePaths) ([]*Event, error) {
+	f, err := os.Open(paths.EventsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

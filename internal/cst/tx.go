@@ -15,6 +15,7 @@ type Tx struct {
 	state   *State
 	actor   string
 	now     time.Time
+	paths   StorePaths
 	pending []*Event
 }
 
@@ -32,17 +33,21 @@ type TxOpts struct {
 // don't open-code it (and can't accidentally drift on, say, lease repair).
 // Errors from fn propaacceptance; pending events commit only on success.
 func WithStore(opts TxOpts, fn func(*Tx) error) error {
-	cfg, err := loadCfg()
+	paths, err := CurrentStorePaths()
 	if err != nil {
 		return err
 	}
-	lock, err := AcquireLock()
+	cfg, err := loadCfg(paths)
+	if err != nil {
+		return err
+	}
+	lock, err := AcquireLockAt(paths)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
 
-	events, err := Replay()
+	events, err := ReplayAt(paths)
 	if err != nil {
 		return err
 	}
@@ -55,7 +60,7 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 
 	if opts.RepairLease {
 		if abandoned := state.LazyAbandonExpired(now); len(abandoned) > 0 {
-			if err := Append(abandoned...); err != nil {
+			if err := AppendAt(paths, abandoned...); err != nil {
 				return err
 			}
 			events = append(events, abandoned...)
@@ -66,7 +71,7 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 		}
 	}
 
-	tx := &Tx{cfg: cfg, state: state, actor: actor, now: now}
+	tx := &Tx{cfg: cfg, state: state, actor: actor, now: now, paths: paths}
 	if err := fn(tx); err != nil {
 		return err
 	}
@@ -74,16 +79,18 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 		if !opts.Mutating {
 			return errors.New("internal: read-only tx attempted to write events")
 		}
-		return Append(tx.pending...)
+		return AppendAt(paths, tx.pending...)
 	}
 	return nil
 }
 
 // Snapshot exposes the tx's read view to handlers without granting write
 // access. Callers may inspect but must mutate only via Tx primitives.
-func (tx *Tx) Snapshot() *State { return tx.state }
-func (tx *Tx) Cfg() Config      { return tx.cfg }
-func (tx *Tx) Actor() string    { return tx.actor }
+func (tx *Tx) Snapshot() *State       { return tx.state }
+func (tx *Tx) Cfg() Config            { return tx.cfg }
+func (tx *Tx) Actor() string          { return tx.actor }
+func (tx *Tx) StorePaths() StorePaths { return tx.paths }
+func (tx *Tx) StoreID() string        { return tx.state.StoreID() }
 
 // CreateGoal appends an aggregate node. The root goal is the only parent==0
 // node in a store; child goals must live under another goal.
@@ -414,21 +421,41 @@ func (tx *Tx) RecordScriptRun(id int64, res RunResult) (*Event, error) {
 	if _, ok := tx.state.Nodes[id]; !ok {
 		return nil, herr(ExitNotFound, "task #%d not found", id)
 	}
+	eventID := res.EventID
+	if eventID == "" {
+		eventID = NewEventID()
+	}
+	gitAvailable := res.GitAvailable
 	ev := &Event{
-		EventID:    NewEventID(),
-		Timestamp:  tx.now,
-		Actor:      tx.actor,
-		Type:       EvScriptRun,
-		AttemptID:  tx.attemptIDForActorClaim(id),
-		NodeID:     id,
-		Trigger:    res.Trigger,
-		CheckName:  res.CheckName,
-		Cmd:        res.Cmd,
-		ExitCode:   res.ExitCode,
-		DurationMs: res.DurationMs,
-		StdoutHead: res.StdoutHead,
-		StderrHead: res.StderrHead,
-		Truncated:  res.Truncated,
+		EventID:                 eventID,
+		Timestamp:               tx.now,
+		Actor:                   tx.actor,
+		Type:                    EvScriptRun,
+		AttemptID:               tx.attemptIDForActorClaim(id),
+		NodeID:                  id,
+		Trigger:                 res.Trigger,
+		CheckName:               res.CheckName,
+		Cmd:                     res.Cmd,
+		ExitCode:                res.ExitCode,
+		DurationMs:              res.DurationMs,
+		StdoutHead:              res.StdoutHead,
+		StderrHead:              res.StderrHead,
+		Truncated:               res.Truncated,
+		StoreID:                 res.StoreID,
+		ExecCWD:                 res.ExecCWD,
+		GitAvailable:            &gitAvailable,
+		GitRoot:                 res.GitRoot,
+		GitHead:                 res.GitHead,
+		GitBranch:               res.GitBranch,
+		GitStatusShort:          res.GitStatusShort,
+		StagedDiffSHA256:        res.StagedDiffSHA256,
+		UnstagedDiffSHA256:      res.UnstagedDiffSHA256,
+		UntrackedManifestSHA256: res.UntrackedManifestSHA256,
+		GitIdentityDigest:       res.GitIdentityDigest,
+		ParallelWorktree:        res.ParallelWorktree,
+		ExecContextDigest:       res.ExecContextDigest,
+		StdoutArtifact:          res.StdoutArtifact,
+		StderrArtifact:          res.StderrArtifact,
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
 		return nil, err
@@ -465,6 +492,14 @@ func (tx *Tx) RecordEvidence(id int64, kind string, summary string, data json.Ra
 		return nil, err
 	}
 	return ev, nil
+}
+
+func (tx *Tx) RecordAcceptanceRunSet(id int64, checks []VerifyCheck, runEvents []*Event) (*Event, error) {
+	data, err := buildAcceptanceRunSetData(checks, runEvents)
+	if err != nil {
+		return nil, herr(ExitInvariantBroken, "%s", err.Error())
+	}
+	return tx.RecordEvidence(id, EvidenceAcceptanceRunSet, "acceptance run set", marshalAcceptanceRunSetData(data))
 }
 
 // CompletionGuard captures the preconditions an in-flight verify acceptance locked
@@ -549,6 +584,12 @@ func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error)
 		if rec.NodeID != g.NodeID {
 			return nil, herr(ExitInvariantBroken, "evidence %s belongs to #%d", evidenceID, rec.NodeID)
 		}
+		if g.AcceptanceKind == AcceptanceVerify && rec.Kind != EvidenceAcceptanceRunSet {
+			return nil, herr(ExitInvariantBroken, "verify completion requires acceptance_run_set evidence, got %s", rec.Kind)
+		}
+	}
+	if g.AcceptanceKind == AcceptanceVerify && evidenceID == "" {
+		return nil, herr(ExitUsage, "verify acceptance requires acceptance_run_set evidence_id")
 	}
 	if g.AcceptanceKind == AcceptanceReview && evidenceID == "" {
 		return nil, herr(ExitUsage, "review acceptance requires --evidence <event-id> or --note")
@@ -686,16 +727,16 @@ func (tx *Tx) applyAndQueue(ev *Event) error {
 // caller's actor AND the lease id captured at the start of the run. The
 // lease-id check prevents an old long-running renewer from extending a new
 // claim that was taken after the original lease was released.
-func renewClaimUnderLock(actor string, id int64, expectedLeaseID string, ttl time.Duration) error {
+func renewClaimUnderLock(paths StorePaths, actor string, id int64, expectedLeaseID string, ttl time.Duration) error {
 	if expectedLeaseID == "" {
 		return errors.New("renew requires lease id")
 	}
-	lock, err := AcquireLock()
+	lock, err := AcquireLockAt(paths)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
-	events, err := Replay()
+	events, err := ReplayAt(paths)
 	if err != nil {
 		return err
 	}
@@ -719,7 +760,7 @@ func renewClaimUnderLock(actor string, id int64, expectedLeaseID string, ttl tim
 		LeaseID:        n.Claim.LeaseID,
 		LeaseExpiresAt: &exp,
 	}
-	return Append(ev)
+	return AppendAt(paths, ev)
 }
 
 // runScriptUnderTx is a thin convenience wrapper used by handlers that need
@@ -738,8 +779,8 @@ func runScript(cfg Config, opts RunOpts) RunResult {
 	return Run(opts)
 }
 
-func loadCfg() (Config, error) {
-	dir, err := EnsureStoreDir()
+func loadCfg(paths StorePaths) (Config, error) {
+	dir, err := EnsureStoreDirAt(paths)
 	if err != nil {
 		return Config{}, err
 	}

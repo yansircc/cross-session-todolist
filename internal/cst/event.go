@@ -53,6 +53,7 @@ const (
 	EvidenceTest             = "test"
 	EvidenceScript           = "script_run"
 	EvidenceVerifierContract = "verifier_contract"
+	EvidenceAcceptanceRunSet = "acceptance_run_set"
 )
 
 type Acceptance struct {
@@ -69,6 +70,12 @@ type Acceptance struct {
 type VerifyCheck struct {
 	Name string `json:"name"`
 	Cmd  string `json:"cmd"`
+}
+
+type ArtifactRef struct {
+	Path     string `json:"path"`
+	SHA256   string `json:"sha256"`
+	ByteSize int64  `json:"byte_size"`
 }
 
 type LegacyGate struct {
@@ -102,14 +109,29 @@ type Event struct {
 	LeaseID        string     `json:"lease_id,omitempty"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 
-	Trigger    string `json:"trigger,omitempty"`
-	CheckName  string `json:"check_name,omitempty"`
-	Cmd        string `json:"cmd,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	StdoutHead string `json:"stdout_head,omitempty"`
-	StderrHead string `json:"stderr_head,omitempty"`
-	Truncated  bool   `json:"truncated,omitempty"`
+	Trigger                 string       `json:"trigger,omitempty"`
+	CheckName               string       `json:"check_name,omitempty"`
+	Cmd                     string       `json:"cmd,omitempty"`
+	ExitCode                int          `json:"exit_code,omitempty"`
+	DurationMs              int64        `json:"duration_ms,omitempty"`
+	StdoutHead              string       `json:"stdout_head,omitempty"`
+	StderrHead              string       `json:"stderr_head,omitempty"`
+	Truncated               bool         `json:"truncated,omitempty"`
+	StoreID                 string       `json:"store_id,omitempty"`
+	ExecCWD                 string       `json:"exec_cwd,omitempty"`
+	GitAvailable            *bool        `json:"git_available,omitempty"`
+	GitRoot                 string       `json:"git_root,omitempty"`
+	GitHead                 string       `json:"git_head,omitempty"`
+	GitBranch               string       `json:"git_branch,omitempty"`
+	GitStatusShort          string       `json:"git_status_short,omitempty"`
+	StagedDiffSHA256        string       `json:"staged_diff_sha256,omitempty"`
+	UnstagedDiffSHA256      string       `json:"unstaged_diff_sha256,omitempty"`
+	UntrackedManifestSHA256 string       `json:"untracked_manifest_sha256,omitempty"`
+	GitIdentityDigest       string       `json:"git_identity_digest,omitempty"`
+	ParallelWorktree        string       `json:"parallel_worktree,omitempty"`
+	ExecContextDigest       string       `json:"exec_context_digest,omitempty"`
+	StdoutArtifact          *ArtifactRef `json:"stdout_artifact,omitempty"`
+	StderrArtifact          *ArtifactRef `json:"stderr_artifact,omitempty"`
 
 	HoldKind string `json:"hold_kind,omitempty"`
 	Reason   string `json:"reason,omitempty"`

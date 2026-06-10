@@ -42,6 +42,8 @@ Command surface:
   cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--after <id> ... | --clear-after] [--reason "..."]
 
   cst brief [--within <id>] [--history]
+  cst claims [--within <id>]
+  cst recover [--within <id>]
   cst show <id>
   cst events --for <id>
   cst events --attempt <attempt-id>
@@ -54,9 +56,12 @@ Command surface:
   cst release <task-id>
   cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
   cst hold <task-id> --clear
-  cst run <task-id> [--check <name>] [--cmd "..."]
+  cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
+  cst run <task-id> --exec-cwd <checkout-root> --acceptance
   cst evidence <id> --kind <kind> --summary "..." [--data JSON]
   cst evidence <id> --kind note --summary "Process note..."
+  cst done <task-id> [--exec-cwd <checkout-root>]
+  cst done <task-id> --from-acceptance <evidence-id>
   cst done <task-id> [--evidence <event-id> | --note "..."]
   cst cancel <id> --reason "..."
 
@@ -80,6 +85,8 @@ Read semantics:
   recent runs/failures. It reports total/shown/truncated metadata for bounded
   collections.
   cst show is a bounded single-node view with aggregate progress and previews.
+  cst claims and cst recover are read-only claim recovery projections. They
+  show actor, task, attempt, lease staleness, and latest execution identity.
   cst events is the event-source reader and always requires an explicit range:
   --for, --since, or --all --raw. Do not use --all in the normal Agent loop.
 
@@ -101,7 +108,13 @@ Acceptance and readiness:
 
 Evidence and scripts:
   cst run records script_run(trigger=probe) and does not change status.
-  cst done on a verify task records script_run(trigger=acceptance) for each check.
+  cst run --acceptance records acceptance script_runs and acceptance_run_set
+  without completing the task.
+  cst done on a verify task records script_run(trigger=acceptance) for each check,
+  then records acceptance_run_set and points task_completed.evidence_id at it.
+  Worker mode keeps ledger and execution identities separate:
+    cst --store /central/repo run 12 --exec-cwd /worker/repo --acceptance
+    cst --store /central/repo done 12 --from-acceptance <evidence-id>
   cst evidence records structured evidence; --data must be JSON.
   claim, script_run, evidence, and completion events from one claim share attempt_id.
   Process notes are evidence: use --kind note. Do not add task note fields or
@@ -133,6 +146,8 @@ Storage:
 
 Global flags:
   --human   emit human-readable text
+  --store <repo-root>
+            read/write the CST ledger under this repo root
   --help    show this help
 
 Exit codes:
@@ -152,11 +167,18 @@ func main() {
 	}
 	args := os.Args[1:]
 	asJSON := true
+	storeRoot := ""
 	var err error
-	args, asJSON, err = extractLeadingFormatFlags(args, asJSON)
+	args, asJSON, storeRoot, err = extractLeadingGlobalFlags(args, asJSON)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cst:", err)
 		os.Exit(int(cst.ExitUsage))
+	}
+	if storeRoot != "" {
+		if err := cst.SetStoreRoot(storeRoot); err != nil {
+			fmt.Fprintln(os.Stderr, "cst:", err)
+			os.Exit(int(cst.ExitUsage))
+		}
 	}
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -190,6 +212,10 @@ func main() {
 		err = runCancel(args, asJSON)
 	case "brief":
 		err = runBrief(args, asJSON)
+	case "claims":
+		err = runClaims(args, asJSON)
+	case "recover":
+		err = runRecover(args, asJSON)
 	case "show":
 		err = runShow(args, asJSON)
 	case "events":
@@ -212,12 +238,29 @@ func main() {
 	}
 }
 
-func extractLeadingFormatFlags(args []string, current bool) ([]string, bool, error) {
+func extractLeadingGlobalFlags(args []string, current bool) ([]string, bool, string, error) {
 	val := current
+	storeRoot := ""
 	for len(args) > 0 {
+		if args[0] == "--store" {
+			if len(args) < 2 || args[1] == "" {
+				return args, val, storeRoot, fmt.Errorf("--store requires a path")
+			}
+			storeRoot = args[1]
+			args = args[2:]
+			continue
+		}
+		if strings.HasPrefix(args[0], "--store=") {
+			storeRoot = strings.TrimPrefix(args[0], "--store=")
+			if storeRoot == "" {
+				return args, val, storeRoot, fmt.Errorf("--store requires a path")
+			}
+			args = args[1:]
+			continue
+		}
 		next, ok, err := formatFlagValue(args[0], val)
 		if err != nil {
-			return args, val, err
+			return args, val, storeRoot, err
 		}
 		if !ok {
 			break
@@ -225,7 +268,7 @@ func extractLeadingFormatFlags(args []string, current bool) ([]string, bool, err
 		val = next
 		args = args[1:]
 	}
-	return args, val, nil
+	return args, val, storeRoot, nil
 }
 
 func extractFormatFlag(args []string, current bool) ([]string, bool, error) {
@@ -463,6 +506,8 @@ func runRun(args []string, asJSON bool) error {
 	format := addCommandFormatFlags(fs)
 	cmd := fs.String("cmd", "", "shell command override")
 	check := fs.String("check", "", "verify check name to run")
+	execCWD := fs.String("exec-cwd", "", "checkout root for shell execution")
+	acceptance := fs.Bool("acceptance", false, "run the full verify acceptance and record acceptance_run_set without completing")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -470,7 +515,12 @@ func runRun(args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	return cst.DoRun(os.Stdout, id, *cmd, *check, asJSON)
+	return cst.DoRunWithArgs(os.Stdout, id, cst.RunArgs{
+		Override:   *cmd,
+		CheckName:  *check,
+		Acceptance: *acceptance,
+		ExecCWD:    *execCWD,
+	}, asJSON)
 }
 
 func runDone(args []string, asJSON bool) error {
@@ -482,6 +532,8 @@ func runDone(args []string, asJSON bool) error {
 	format := addCommandFormatFlags(fs)
 	evidence := fs.String("evidence", "", "evidence event id")
 	note := fs.String("note", "", "inline review note evidence")
+	execCWD := fs.String("exec-cwd", "", "checkout root for verify shell execution")
+	fromAcceptance := fs.String("from-acceptance", "", "acceptance_run_set evidence id")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -490,8 +542,10 @@ func runDone(args []string, asJSON bool) error {
 		return err
 	}
 	return cst.DoDone(os.Stdout, id, cst.DoneArgs{
-		EvidenceID: *evidence,
-		Note:       *note,
+		EvidenceID:       *evidence,
+		Note:             *note,
+		ExecCWD:          *execCWD,
+		FromAcceptanceID: *fromAcceptance,
 	}, asJSON)
 }
 
@@ -553,6 +607,40 @@ func runBrief(args []string, asJSON bool) error {
 		return fmt.Errorf("brief takes only flags")
 	}
 	return cst.DoBriefWithOptions(os.Stdout, cst.BriefOptions{ScopeID: *within, History: *history}, asJSON)
+}
+
+func runClaims(args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("claims", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	within := fs.Int64("within", 0, "scope claims to a goal/task subtree")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	asJSON, err := resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("claims takes only flags")
+	}
+	return cst.DoClaims(os.Stdout, cst.ClaimsArgs{Within: *within}, asJSON)
+}
+
+func runRecover(args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("recover", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	within := fs.Int64("within", 0, "scope recovery view to a goal/task subtree")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	asJSON, err := resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("recover takes only flags")
+	}
+	return cst.DoRecover(os.Stdout, cst.ClaimsArgs{Within: *within}, asJSON)
 }
 
 func runShow(args []string, asJSON bool) error {
