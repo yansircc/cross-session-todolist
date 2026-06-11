@@ -346,6 +346,9 @@ func TestReviewChecklistEvidenceShape(t *testing.T) {
 	if err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceReviewChecklist, Summary: "bad checklist", Data: invalid}, false); err == nil {
 		t.Fatal("expected invalid review checklist status to fail")
 	}
+	if err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceReviewChecklist, Summary: "empty checklist", Data: `{}`}, false); err == nil {
+		t.Fatal("expected empty review checklist to fail")
+	}
 }
 
 func TestClaimsShowPathOverlaps(t *testing.T) {

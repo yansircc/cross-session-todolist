@@ -328,7 +328,9 @@ Structured review tasks can record `evidence_recorded(kind=review_checklist)`:
 ```
 
 The reducer validates checklist shape and statuses (`pass`, `fail`, `na`); it
-does not turn review judgment into a policy engine.
+does not turn review judgment into a policy engine. Checklist templates should
+use a different evidence kind such as `review_checklist_template`;
+`review_checklist` is reserved for itemized review results.
 
 For verify acceptance, `done` records successful `script_run(trigger=acceptance)`
 events and an `acceptance_run_set` evidence, then completes with that run-set as

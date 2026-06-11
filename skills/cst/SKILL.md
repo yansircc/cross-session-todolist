@@ -195,8 +195,10 @@ Only the same explicit actor may auto-renew an active or expired claim during
 `cst take`; CST does not infer liveness.
 
 Review tasks can record structured coverage with
-`evidence(kind=review_checklist)`. `done --commit <sha>` records an auxiliary
-commit edge only; it does not replace verify or review evidence.
+`evidence(kind=review_checklist)` using an `items` array. Checklist templates
+must use a different kind such as `review_checklist_template`; do not put
+template-shaped data under `review_checklist`. `done --commit <sha>` records an
+auxiliary commit edge only; it does not replace verify or review evidence.
 
 Do not infer workstream scope from `attempt_id`; use explicit `--parent` and
 `--within`.
