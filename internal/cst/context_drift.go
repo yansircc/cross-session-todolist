@@ -1,10 +1,5 @@
 package cst
 
-import (
-	"encoding/json"
-	"fmt"
-)
-
 type contextDriftEvidence struct {
 	AcceptanceEvidenceID string                     `json:"acceptance_evidence_id"`
 	Mode                 string                     `json:"mode"`
@@ -39,62 +34,14 @@ func validateAcceptanceContextForCompletion(tx *Tx, id int64, evidenceID string,
 	if !ok || rec.Kind != EvidenceAcceptanceRunSet {
 		return nil, nil
 	}
-	data, err := parseAcceptanceRunSetData(rec.Data)
-	if err != nil {
-		return nil, err
+	decision, ev := acceptanceContextDecision(tx.state, tx.StoreID(), id, rec, execCWDOverride, tx.now)
+	if !decision.Accept {
+		return nil, herr(ExitInvariantBroken, "%s", decision.Reason)
 	}
-	if data.ExecutionContext == nil {
+	if ev == nil {
 		return nil, nil
 	}
-	n := tx.state.Nodes[id]
-	if n == nil {
-		return nil, herr(ExitNotFound, "task #%d not found", id)
-	}
-	if !n.EnvelopeEventAt.IsZero() && n.EnvelopeEventAt.After(rec.At) {
-		return nil, herr(ExitInvariantBroken, "task #%d execution envelope changed after acceptance run-set", id)
-	}
-	env := effectiveExecutionEnvelope(n)
-	execCWD := resolveExecCWD(execCWDOverride, env)
-	current, currentDigest := currentAcceptanceContext(tx.StoreID(), execCWD, env)
-	expected := *data.ExecutionContext
-	expected.ExecSurface = firstNonEmpty(expected.ExecSurface, ExecSurfaceShared)
-	expected.OwnedPaths = normalizeOwnedPaths(expected.OwnedPaths)
-	if current.ExecCWD != expected.ExecCWD {
-		return nil, herr(ExitInvariantBroken, "task #%d acceptance exec_cwd drifted; rerun acceptance", id)
-	}
-	if current.ExecSurface != expected.ExecSurface || !sameStringList(current.OwnedPaths, expected.OwnedPaths) {
-		return nil, herr(ExitInvariantBroken, "task #%d acceptance execution envelope drifted; rerun acceptance", id)
-	}
-	if expected.ExecSurface == ExecSurfacePrivate {
-		if currentDigest != data.ContextDigest {
-			return nil, herr(ExitInvariantBroken, "task #%d private execution context drifted; rerun acceptance", id)
-		}
-		return nil, nil
-	}
-	if len(expected.OwnedPaths) > 0 && current.ScopedDigest != expected.ScopedDigest {
-		return nil, herr(ExitInvariantBroken, "task #%d scoped execution context drifted; rerun acceptance", id)
-	}
-	reason := ""
-	if len(expected.OwnedPaths) > 0 && current.OutOfScopeDigest != expected.OutOfScopeDigest {
-		reason = "out_of_scope_drift"
-	}
-	if len(expected.OwnedPaths) == 0 && current.WholeRepoDigest != expected.WholeRepoDigest {
-		reason = "whole_repo_drift"
-	}
-	if reason == "" {
-		return nil, nil
-	}
-	raw, err := json.Marshal(contextDriftEvidence{
-		AcceptanceEvidenceID: evidenceID,
-		Mode:                 ExecSurfaceShared,
-		Reason:               reason,
-		Expected:             expected,
-		Current:              current,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal context drift evidence: %w", err)
-	}
-	return tx.RecordEvidence(id, EvidenceContextDrift, reason, raw)
+	return tx.RecordEvidence(id, EvidenceContextDrift, ev.EvidenceSummary, ev.EvidenceData)
 }
 
 func sameStringList(a []string, b []string) bool {

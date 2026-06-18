@@ -551,31 +551,45 @@ type CompletionGuard struct {
 // the caller and returns a guard the caller passes to CompleteTask after any
 // out-of-lock work (such as running a verify shell command).
 func (tx *Tx) PrepareCompletionGuard(id int64) (CompletionGuard, error) {
-	n, err := tx.requireOpenTask(id)
-	if err != nil {
-		return CompletionGuard{}, err
+	return completionGuardFromSnapshot(tx.state, id, tx.actor)
+}
+
+func completionGuardFromSnapshot(s *State, id int64, actor string) (CompletionGuard, error) {
+	n, ok := s.Nodes[id]
+	if !ok {
+		return CompletionGuard{}, herr(ExitNotFound, "task #%d not found", id)
 	}
-	if err := tx.requireCallerOwnsClaim(n); err != nil {
-		return CompletionGuard{}, err
+	if n.Kind != KindTask {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "node #%d is %s, not task", id, n.Kind)
 	}
-	if ok, why := tx.state.CanComplete(id); !ok {
+	if n.Terminal() {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d already terminal", id)
+	}
+	if n.Claim == nil {
+		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d is not claimed; run `cst take %d` first", n.ID, n.ID)
+	}
+	if n.Claim.Actor != actor {
+		return CompletionGuard{}, herr(ExitClaimConflict, "task #%d held by %s, not %s", n.ID, n.Claim.Actor, actor)
+	}
+	if ok, why := s.CanComplete(id); !ok {
 		return CompletionGuard{}, herr(ExitInvariantBroken, "%s", why)
 	}
-	if failed := tx.state.DependencyFailedIDs(n); len(failed) > 0 {
+	if failed := s.DependencyFailedIDs(n); len(failed) > 0 {
 		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d has canceled prerequisite(s): %v", id, failed)
 	}
-	if waiting := tx.state.WaitingOnIDs(n); len(waiting) > 0 {
+	if waiting := s.WaitingOnIDs(n); len(waiting) > 0 {
 		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d is waiting on prerequisite(s): %v", id, waiting)
 	}
 	if n.Acceptance == nil {
 		return CompletionGuard{}, herr(ExitInvariantBroken, "task #%d has no acceptance", id)
 	}
-	g := CompletionGuard{NodeID: id, AcceptanceKind: n.Acceptance.Kind, VerifyChecks: n.Acceptance.VerifyChecks()}
-	if n.Claim != nil {
-		g.ClaimLeaseID = n.Claim.LeaseID
-		g.ClaimAttemptID = n.Claim.AttemptID
-	}
-	return g, nil
+	return CompletionGuard{
+		NodeID:         id,
+		AcceptanceKind: n.Acceptance.Kind,
+		VerifyChecks:   n.Acceptance.VerifyChecks(),
+		ClaimLeaseID:   n.Claim.LeaseID,
+		ClaimAttemptID: n.Claim.AttemptID,
+	}, nil
 }
 
 func (tx *Tx) RenewExecutionClaim(id int64) (*Event, error) {
@@ -625,32 +639,21 @@ func (tx *Tx) RenewExecutionClaim(id int64) (*Event, error) {
 // guard's preconditions inside the current lock, so verify-acceptance completions
 // that race with cancel/release/lease-expiry are rejected.
 func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error) {
-	n, err := tx.requireOpenTask(g.NodeID)
+	current, err := completionGuardFromSnapshot(tx.state, g.NodeID, tx.actor)
 	if err != nil {
 		return nil, err
 	}
-	if ok, why := tx.state.CanComplete(g.NodeID); !ok {
-		return nil, herr(ExitInvariantBroken, "%s", why)
-	}
-	if failed := tx.state.DependencyFailedIDs(n); len(failed) > 0 {
-		return nil, herr(ExitInvariantBroken, "task #%d has canceled prerequisite(s): %v", g.NodeID, failed)
-	}
-	if waiting := tx.state.WaitingOnIDs(n); len(waiting) > 0 {
-		return nil, herr(ExitInvariantBroken, "task #%d is waiting on prerequisite(s): %v", g.NodeID, waiting)
-	}
-	if n.Acceptance == nil || n.Acceptance.Kind != g.AcceptanceKind {
+	n := tx.state.Nodes[g.NodeID]
+	if current.AcceptanceKind != g.AcceptanceKind {
 		return nil, herr(ExitInvariantBroken, "task #%d acceptance changed under us", g.NodeID)
 	}
-	if g.AcceptanceKind == AcceptanceVerify && !sameVerifyChecks(n.Acceptance.VerifyChecks(), g.VerifyChecks) {
+	if g.AcceptanceKind == AcceptanceVerify && !sameVerifyChecks(current.VerifyChecks, g.VerifyChecks) {
 		return nil, herr(ExitInvariantBroken, "task #%d verify checks changed under us", g.NodeID)
 	}
-	if err := tx.requireCallerOwnsClaim(n); err != nil {
-		return nil, err
-	}
-	if n.Claim != nil && g.ClaimLeaseID != "" && n.Claim.LeaseID != g.ClaimLeaseID {
+	if g.ClaimLeaseID != "" && current.ClaimLeaseID != g.ClaimLeaseID {
 		return nil, herr(ExitClaimConflict, "task #%d claim changed under us", g.NodeID)
 	}
-	if n.Claim != nil && g.ClaimAttemptID != "" && n.Claim.AttemptID != g.ClaimAttemptID {
+	if g.ClaimAttemptID != "" && current.ClaimAttemptID != g.ClaimAttemptID {
 		return nil, herr(ExitClaimConflict, "task #%d attempt changed under us", g.NodeID)
 	}
 	if evidenceID != "" {

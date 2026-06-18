@@ -62,6 +62,11 @@ type RunArgs struct {
 	ExecCWD    string
 }
 
+type WorkerRunArgs struct {
+	ActionID  string
+	CommitSHA string
+}
+
 type EvidenceArgs struct {
 	Kind    string
 	Summary string
@@ -455,6 +460,56 @@ func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 		return res.ArtifactError
 	}
 	return nil
+}
+
+func DoWorkerStatus(out io.Writer, id int64, asJSON bool) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+		view, err := BuildWorkerStatus(FrontierInputFromTx(tx, id))
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			WriteJSON(out, view)
+		} else {
+			RenderWorkerStatusText(out, view)
+		}
+		return nil
+	})
+}
+
+func DoWorkerRun(out io.Writer, id int64, args WorkerRunArgs, asJSON bool) error {
+	if args.ActionID == "" {
+		return herr(ExitUsage, "worker-run requires --action <action-id>")
+	}
+	if args.CommitSHA != "" && !validCommitSHA(args.CommitSHA) {
+		return herr(ExitUsage, "--commit requires a git commit sha")
+	}
+	var selected BoundAction
+	err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+		input := FrontierInputFromTx(tx, id)
+		for _, action := range LegalFrontier(input) {
+			if action.ActionID == args.ActionID {
+				selected = action
+				return nil
+			}
+		}
+		return herr(ExitInvariantBroken, "worker action %s is not in the current frontier; rerun `cst worker-status %d`", args.ActionID, id)
+	})
+	if err != nil {
+		return err
+	}
+	switch selected.Kind {
+	case ActionTakeReadyTask:
+		return DoTake(out, id, asJSON)
+	case ActionRunAcceptance:
+		return DoRunWithArgs(out, id, RunArgs{Acceptance: true, ExecCWD: selected.ExecCWD}, asJSON)
+	case ActionCompleteFromAcceptance:
+		return DoDone(out, id, DoneArgs{FromAcceptanceID: selected.EvidenceID, CommitSHA: args.CommitSHA}, asJSON)
+	case ActionCompleteReviewWithEvidence:
+		return DoDone(out, id, DoneArgs{EvidenceID: selected.EvidenceID, CommitSHA: args.CommitSHA}, asJSON)
+	default:
+		return herr(ExitInvariantBroken, "worker action %s has unsupported kind %q", selected.ActionID, selected.Kind)
+	}
 }
 
 func emitRun(out io.Writer, asJSON bool, id int64, res RunResult) {

@@ -58,6 +58,8 @@ Command surface:
   cst hold <task-id> --clear
   cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
   cst run <task-id> [--exec-cwd <checkout-root>] --acceptance
+  cst worker-status <task-id>
+  cst worker-run <task-id> --action <action-id> [--commit <sha>]
   cst evidence <id> --kind <kind> --summary "..." [--data JSON]
   cst evidence <id> --kind note --summary "Process note..."
   cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
@@ -72,8 +74,10 @@ Agent loop:
   4. If no claim exists, cst take or cst take <ready-task-id>.
   5. Do the work.
   6. Optional probe: cst run <id> [--cmd "..."].
-  7. Finish: cst done <id> for verify acceptance, cst done <id> --note "..." or
-     cst done <id> --evidence <event-id> for review acceptance,
+  7. Finish: cst done <id> for verify acceptance; in worker mode use
+     cst worker-status <id> then cst worker-run <id> --action <action-id>;
+     use cst done <id> --note "..." or cst done <id> --evidence <event-id>
+     for review acceptance,
      cst hold <id> --kind blocked|waiting|deferred --reason "...", or
      cst cancel <id> --reason "...".
   8. Stop only when cst brief shows root.status=completed and claims=[].
@@ -112,10 +116,12 @@ Evidence and scripts:
   without completing the task.
   cst done on a verify task records script_run(trigger=acceptance) for each check,
   then records acceptance_run_set and points task_completed.evidence_id at it.
+  cst worker-status projects bound legal worker actions. cst worker-run reprojects
+  before execution and refuses stale action ids.
   Execution envelopes keep ledger and execution identities separate:
     cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
-    cst --store /central/repo run 12 --acceptance
-    cst --store /central/repo done 12 --from-acceptance <evidence-id>
+    cst --store /central/repo worker-status 12 --human
+    cst --store /central/repo worker-run 12 --action <action-id>
   --exec-cwd on add/revise becomes the task default. --exec-cwd on run/done is
   a one-command override. Private exec surfaces reject any final context drift.
   Shared surfaces reject scoped drift but record context_drift evidence and
@@ -215,6 +221,10 @@ func main() {
 		err = runHold(args, asJSON)
 	case "run":
 		err = runRun(args, asJSON)
+	case "worker-status":
+		err = runWorkerStatus(args, asJSON)
+	case "worker-run":
+		err = runWorkerRun(args, asJSON)
 	case "evidence":
 		err = runEvidence(args, asJSON)
 	case "done":
@@ -663,6 +673,48 @@ func runDone(args []string, asJSON bool) error {
 		FromAcceptanceID: *fromAcceptance,
 		CommitSHA:        *commitSHA,
 	}, asJSON)
+}
+
+func runWorkerStatus(args []string, asJSON bool) error {
+	id, rest, err := splitIDArg(args, "worker-status")
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("worker-status", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("worker-status takes only flags after the task id")
+	}
+	return cst.DoWorkerStatus(os.Stdout, id, asJSON)
+}
+
+func runWorkerRun(args []string, asJSON bool) error {
+	id, rest, err := splitIDArg(args, "worker-run")
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("worker-run", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	actionID := fs.String("action", "", "worker frontier action id")
+	commitSHA := fs.String("commit", "", "git commit sha to bind as auxiliary evidence")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("worker-run takes only flags after the task id")
+	}
+	return cst.DoWorkerRun(os.Stdout, id, cst.WorkerRunArgs{ActionID: *actionID, CommitSHA: *commitSHA}, asJSON)
 }
 
 func runEvidence(args []string, asJSON bool) error {

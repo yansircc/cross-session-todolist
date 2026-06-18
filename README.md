@@ -165,6 +165,8 @@ cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
 cst hold <task-id> --clear
 cst run <task-id> [--exec-cwd <checkout-root>] [--check <name>] [--cmd "..."]
 cst run <task-id> [--exec-cwd <checkout-root>] --acceptance
+cst worker-status <task-id>
+cst worker-run <task-id> --action <action-id> [--commit <sha>]
 cst evidence <id> --kind <kind> --summary "..." [--data JSON]
 cst evidence <id> --kind note --summary "Process note..."
 cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
@@ -212,8 +214,8 @@ cross-session completion, persist the execution envelope on the task first:
 
 ```sh
 cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
-cst --store /central/repo run 12 --acceptance
-cst --store /central/repo done 12 --from-acceptance <acceptance-run-set-evidence-id>
+cst --store /central/repo worker-status 12 --human
+cst --store /central/repo worker-run 12 --action <action-id>
 ```
 
 `--store` chooses the CST ledger owner. `--exec-cwd` chooses the checkout where
@@ -230,6 +232,13 @@ rejects any context drift between acceptance and done. The default surface is
 `shared`; on shared checkouts, scoped drift rejects, while out-of-scope drift is
 recorded as `evidence(kind=context_drift)` because git cannot attribute that
 change to one actor.
+
+`worker-status` is the worker execution projection. It recomputes the legal
+frontier from the event log and returns bound actions with `store_root`, `store_id`,
+task id, claim, attempt, execution envelope, and evidence id already filled.
+`worker-run` accepts one of those action ids, recomputes the frontier at execution
+time, and refuses stale or drifted actions. The previewed `run` / `done` commands
+are informational; the wrapper is the closed loop.
 
 `--review <who>` means `done` requires evidence or a note.
 
@@ -428,6 +437,11 @@ current frontier, not a full history browser.
 `cst show <id>` is a bounded single-node view. It includes scalar node facts,
 aggregate progress, inherited rules, and bounded previews of children, recent
 runs, and recent evidence. It is not a subtree dump.
+
+`cst worker-status <task-id>` is a bounded worker view over one task. It derives
+legal bound actions from the same admissibility predicate used by completion, and
+it records subagents only as external observations. `cst worker-run` must
+re-read this frontier before executing an action id.
 
 Use explicit event ranges for history:
 

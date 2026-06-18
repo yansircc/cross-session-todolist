@@ -86,8 +86,8 @@ Worker acceptance flow:
 
 ```sh
 cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
-cst --store /central/repo run 12 --acceptance
-cst --store /central/repo done 12 --from-acceptance <acceptance-run-set-evidence-id>
+cst --store /central/repo worker-status 12 --human
+cst --store /central/repo worker-run 12 --action <action-id>
 ```
 
 For verify tasks, ordinary `--note` / `--evidence` completion is still invalid.
@@ -97,6 +97,11 @@ Private execution surfaces reject any final context drift. Shared surfaces
 reject scoped drift but record `evidence(kind=context_drift)` and allow
 completion for out-of-scope drift because shared checkouts cannot attribute that
 change to one actor.
+
+`worker-status` is read-only and derives bound legal actions from the event log.
+`worker-run` reprojects the frontier at execution time and refuses stale action
+ids. The previewed `run --acceptance` / `done --from-acceptance` commands are
+informational; the action id is the executable worker handoff.
 
 ## Modeling
 
