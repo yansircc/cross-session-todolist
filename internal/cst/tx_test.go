@@ -3,6 +3,7 @@ package cst
 import (
 	"errors"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -381,6 +382,76 @@ func TestAfterTaskIsNotReadyUntilPrerequisiteCompletes(t *testing.T) {
 	state = replayState(t)
 	if !state.IsReadyTask(3) {
 		t.Fatal("after task should become ready after prerequisite completes")
+	}
+}
+
+func TestTakeCanAtomicallyBindExecutionEnvelope(t *testing.T) {
+	dir := withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Intent: "task", AcceptanceReview: "self"}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := filepath.Join(dir, "worker")
+	if err := DoTakeWithArgs(io.Discard, 2, TakeArgs{Envelope: &ExecutionEnvelope{
+		ExecCWD:     worker,
+		ExecSurface: ExecSurfacePrivate,
+		OwnedPaths:  []string{"internal/parser"},
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	events := replayEvents(t)
+	if got := events[len(events)-2].Type; got != EvNodeRevised {
+		t.Fatalf("penultimate event = %s, want %s", got, EvNodeRevised)
+	}
+	if got := events[len(events)-1].Type; got != EvClaimTaken {
+		t.Fatalf("last event = %s, want %s", got, EvClaimTaken)
+	}
+	state := replayState(t)
+	task := state.Nodes[2]
+	if task.Claim == nil {
+		t.Fatal("expected task to be claimed")
+	}
+	if task.Envelope == nil {
+		t.Fatal("expected execution envelope")
+	}
+	if task.Envelope.ExecCWD != worker {
+		t.Fatalf("exec_cwd = %q, want %q", task.Envelope.ExecCWD, worker)
+	}
+	if task.Envelope.ExecSurface != ExecSurfacePrivate {
+		t.Fatalf("exec_surface = %q, want %q", task.Envelope.ExecSurface, ExecSurfacePrivate)
+	}
+	if len(task.Envelope.OwnedPaths) != 1 || task.Envelope.OwnedPaths[0] != "internal/parser" {
+		t.Fatalf("owned paths = %#v", task.Envelope.OwnedPaths)
+	}
+}
+
+func TestTakeEnvelopeDoesNotCommitWhenClaimIsRejected(t *testing.T) {
+	dir := withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Intent: "first", AcceptanceReview: "self"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Intent: "blocked", AcceptanceReview: "self", After: []int64{2}}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	before := len(replayEvents(t))
+	err := DoTakeWithArgs(io.Discard, 3, TakeArgs{Envelope: &ExecutionEnvelope{
+		ExecCWD:     filepath.Join(dir, "worker"),
+		ExecSurface: ExecSurfacePrivate,
+	}}, false)
+	if err == nil {
+		t.Fatal("expected take rejection")
+	}
+	after := replayEvents(t)
+	if len(after) != before {
+		t.Fatalf("expected no committed envelope revision on rejected take: before=%d after=%d", before, len(after))
 	}
 }
 

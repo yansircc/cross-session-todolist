@@ -159,7 +159,7 @@ cst events --since <event-id>
 cst events --for <id> --attempt <attempt-id> --since <event-id>
 cst events --all --raw
 
-cst take [<task-id>]
+cst take [<task-id>] [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...]
 cst release <task-id>
 cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
 cst hold <task-id> --clear
@@ -220,8 +220,10 @@ cst --store /central/repo worker-run 12 --action <action-id>
 
 `--store` chooses the CST ledger owner. `--exec-cwd` chooses the checkout where
 the shell command runs. They are independent axes. `--exec-cwd` on `add` or
-`revise` becomes the task default; `--exec-cwd` on `run` / `done` is only a
-one-command override and does not mutate the task envelope. Events record
+`revise` becomes the task default; `cst take <id> --exec-cwd ...` atomically
+binds the task envelope and claim in one ledger transaction. `--exec-cwd` on
+`run` / `done` is only a one-command override and does not mutate the task
+envelope. Events record
 `store_id` (the root `node_created.event_id`), `exec_cwd`, git
 head/branch/status, whole-repo diff hashes, scoped diff hashes when
 `--scope` exists, out-of-scope summaries, and full stdout/stderr artifact

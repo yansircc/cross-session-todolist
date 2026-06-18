@@ -47,6 +47,10 @@ type AddArgs struct {
 	Envelope         *ExecutionEnvelope
 }
 
+type TakeArgs struct {
+	Envelope *ExecutionEnvelope
+}
+
 type DoneArgs struct {
 	EvidenceID       string
 	Note             string
@@ -320,6 +324,10 @@ func parseEvidenceData(raw string) (json.RawMessage, error) {
 }
 
 func DoTake(out io.Writer, id int64, asJSON bool) error {
+	return DoTakeWithArgs(out, id, TakeArgs{}, asJSON)
+}
+
+func DoTakeWithArgs(out io.Writer, id int64, args TakeArgs, asJSON bool) error {
 	var emitted *Event
 	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
 		target := id
@@ -329,6 +337,22 @@ func DoTake(out io.Writer, id int64, asJSON bool) error {
 				return herr(ExitNotFound, "no open task available to take")
 			}
 			target = head[0].ID
+		}
+		if args.Envelope != nil {
+			if _, err := tx.ReviseNode(target, ReviseSpec{
+				EnvelopeSet: true,
+				EnvelopePatch: ExecutionEnvelopePatch{
+					ExecCWDSet:     true,
+					ExecCWD:        args.Envelope.ExecCWD,
+					ExecSurfaceSet: true,
+					ExecSurface:    args.Envelope.ExecSurface,
+					OwnedPathsSet:  true,
+					OwnedPaths:     args.Envelope.OwnedPaths,
+				},
+				Reason: "bind execution envelope for claim",
+			}); err != nil {
+				return err
+			}
 		}
 		ev, err := tx.TakeClaim(target)
 		if err != nil {

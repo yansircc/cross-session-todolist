@@ -52,7 +52,7 @@ Command surface:
   cst events --all --raw
   cst ui [--within <id>] [-o <path>] [--no-open] [--stdout]
 
-  cst take [<task-id>]
+  cst take [<task-id>] [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...]
   cst release <task-id>
   cst hold <task-id> --kind blocked|waiting|deferred --reason "..."
   cst hold <task-id> --clear
@@ -596,16 +596,31 @@ func runHold(args []string, asJSON bool) error {
 }
 
 func runTake(args []string, asJSON bool) error {
-	var err error
-	args, asJSON, err = extractFormatFlag(args, asJSON)
+	id, rest, err := optionalIDArg(args)
 	if err != nil {
 		return err
 	}
-	id, _, err := optionalIDArg(args)
+	fs := flag.NewFlagSet("take", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	execCWD := fs.String("exec-cwd", "", "default checkout root for claimed task execution")
+	privateExec := fs.Bool("private-exec-cwd", false, "mark exec-cwd as actor-private mutable surface")
+	var scope stringListFlag
+	fs.Var(&scope, "scope", "owned path under exec checkout (repeatable)")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
 	if err != nil {
 		return err
 	}
-	return cst.DoTake(os.Stdout, id, asJSON)
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("take accepts at most one positional id before flags")
+	}
+	envelope, err := buildAddEnvelope(*execCWD, *privateExec, scope.Values())
+	if err != nil {
+		return err
+	}
+	return cst.DoTakeWithArgs(os.Stdout, id, cst.TakeArgs{Envelope: envelope}, asJSON)
 }
 
 func runRelease(args []string, asJSON bool) error {

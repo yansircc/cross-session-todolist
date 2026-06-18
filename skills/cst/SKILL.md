@@ -39,6 +39,12 @@ If no claim exists, take a ready task:
 cst take
 ```
 
+For a worker checkout, bind the execution envelope and claim atomically:
+
+```sh
+cst --store /central/repo take 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
+```
+
 ## Work Loop
 
 1. `cst brief`
@@ -74,6 +80,8 @@ Do not let process cwd imply identity across a session or worker boundary.
   envelope; on `run` / `done` it is only a one-command override.
 - `--private-exec-cwd` marks the checkout as actor-private. Without it the
   surface is shared.
+- `cst take <id> --exec-cwd ...` binds the task envelope and claim in one
+  transaction, which is the worker setup path when the worker path is known.
 - `--scope <path>` declares owned paths for scoped drift checks and projection
   noise reduction. Scope is a view, not truth: out-of-scope changes are still
   recorded.
