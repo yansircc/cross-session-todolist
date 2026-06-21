@@ -1,10 +1,8 @@
 package cst
 
 import (
-	"encoding/json"
 	"fmt"
 	"html"
-	"sort"
 	"strings"
 	"time"
 )
@@ -14,239 +12,382 @@ import (
 func renderHTML(v uiView) string {
 	var sb strings.Builder
 	sb.WriteString(`<!doctype html>` + "\n")
-	sb.WriteString(`<html lang="zh"><head>` + "\n")
+	sb.WriteString(`<html lang="zh-CN"><head>` + "\n")
 	sb.WriteString(`<meta charset="utf-8">` + "\n")
 	sb.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">` + "\n")
 	sb.WriteString(`<title>`)
-	sb.WriteString(html.EscapeString(v.Project + " · CST 当前状态"))
+	sb.WriteString(html.EscapeString(v.Project + " · CST Progress"))
 	sb.WriteString(`</title>` + "\n")
 	sb.WriteString(`<style>`)
 	sb.WriteString(uiCSS)
-	sb.WriteString(`</style>` + "\n</head><body><main>\n")
+	sb.WriteString(`</style>` + "\n</head><body>\n")
 
-	renderHeader(&sb, v)
-	renderKPI(&sb, v)
-	renderRunDiagnostics(&sb, v)
+	sb.WriteString(`<div class="layout">`)
+	renderRail(&sb, v)
+	renderMain(&sb, v)
+	renderSide(&sb, v)
+	sb.WriteString(`</div>`)
 
-	if len(v.ActiveScopes) == 0 {
-		sb.WriteString(`<div class="empty">所有 goal 已收敛，没有进行中的任务。</div>` + "\n")
-	} else {
-		renderScopeNav(&sb, v.ActiveScopes)
-		for _, sc := range v.ActiveScopes {
-			renderScope(&sb, sc)
-		}
-	}
-
-	renderFooter(&sb, v)
-	sb.WriteString(`</main></body></html>` + "\n")
+	sb.WriteString(`</body></html>` + "\n")
 	return sb.String()
 }
 
-func renderHeader(sb *strings.Builder, v uiView) {
-	fmt.Fprintf(sb, `<h1>%s · CST 当前状态</h1>`+"\n", html.EscapeString(v.Project))
-	totalNodes := v.GoalCount + v.RuleCount + v.TotalTasks
+func renderRail(sb *strings.Builder, v uiView) {
+	sb.WriteString(`<aside class="rail">`)
+	sb.WriteString(`<div class="brand">`)
+	fmt.Fprintf(sb, `<h1>%s</h1>`, html.EscapeString(v.Project+" CST"))
+	rootText := "empty store"
+	if v.Root != nil {
+		rootText = fmt.Sprintf("#%d %s", v.Root.ID, v.Root.Intent)
+	}
+	fmt.Fprintf(sb, `<div class="root mono">%s</div>`, html.EscapeString(truncate(rootText, 90)))
+	sb.WriteString(`</div>`)
+
+	if len(v.ActivePhases) > 0 {
+		sb.WriteString(`<nav class="nav-list" aria-label="active phases">`)
+		for i, phase := range v.ActivePhases {
+			active := ""
+			if i == 0 {
+				active = " active"
+			}
+			fmt.Fprintf(sb,
+				`<a class="nav-item%s" href="#phase-%d"><span class="mono">#%d</span><span class="name">%s</span><span class="dot %s" aria-hidden="true">•</span></a>`,
+				active, phase.Node.ID, phase.Node.ID, html.EscapeString(truncate(phase.Node.Intent, 28)), html.EscapeString(phaseStatusClass(phase)))
+		}
+		sb.WriteString(`</nav>`)
+	} else {
+		sb.WriteString(`<div class="empty-rail">No active phase</div>`)
+	}
+
 	fmt.Fprintf(sb,
-		`<div class="report-meta"><span>snapshot %s</span><span>events %d</span><span>nodes %d</span><span style="color:var(--md-ink)">open tasks %d</span></div>`+"\n",
-		v.GeneratedAt.Format("2006-01-02 15:04"),
-		v.TotalEvents, totalNodes, v.OpenTasks)
-	fmt.Fprintf(sb, `<div class="report-meta"><span class="kbd">%s</span></div>`+"\n",
-		html.EscapeString(v.EventsPath))
+		`<div class="rail-footer mono">events=%d<br>last=%s</div>`,
+		v.TotalEvents, html.EscapeString(lastEventID(v)))
+	sb.WriteString(`</aside>`)
 }
 
-func renderKPI(sb *strings.Builder, v uiView) {
-	sb.WriteString(`<div class="kpi-grid">`)
-	fmt.Fprintf(sb, `<div class="stat-card"><div class="stat-label">active scopes</div><div class="stat-value">%d</div></div>`, len(v.ActiveScopes))
-	fmt.Fprintf(sb, `<div class="stat-card"><div class="stat-label">open / total</div><div class="stat-value">%d / %d</div></div>`, v.OpenTasks, v.TotalTasks)
-	fmt.Fprintf(sb, `<div class="stat-card"><div class="stat-label">claimed · held</div><div class="stat-value">%d · %d</div></div>`, v.ClaimedTasks, v.HeldTasks)
-	fmt.Fprintf(sb, `<div class="stat-card"><div class="stat-label">last event</div><div class="stat-value">%s</div></div>`, html.EscapeString(humanize(v.LastEvent, v.GeneratedAt)))
-	sb.WriteString(`</div>` + "\n")
+func renderMain(sb *strings.Builder, v uiView) {
+	sb.WriteString(`<main class="content">`)
+	renderTop(sb, v)
+	renderSummary(sb, v)
+	renderPhaseSection(sb, v)
+	sb.WriteString(`</main>`)
 }
 
-func renderRunDiagnostics(sb *strings.Builder, v uiView) {
-	if len(v.RecentFailures) == 0 && len(v.RecentRuns) == 0 {
+func renderTop(sb *strings.Builder, v uiView) {
+	title := "No active work. Frontier is closed."
+	if v.Summary.OpenTasks > 0 {
+		title = fmt.Sprintf("%d%% done. %s.", v.Summary.PercentDone, currentGateSentence(v))
+	}
+	sb.WriteString(`<header class="top">`)
+	sb.WriteString(`<div>`)
+	sb.WriteString(`<div class="eyebrow">frontier-first phase dashboard</div>`)
+	fmt.Fprintf(sb, `<h2 class="title">%s</h2>`, html.EscapeString(title))
+	sb.WriteString(`<div class="meta">`)
+	scopeText := "scope none"
+	if v.Scope != nil {
+		scopeStatus := "closed"
+		if v.Summary.OpenTasks > 0 {
+			scopeStatus = "active"
+		}
+		scopeText = fmt.Sprintf("scope #%d %s", v.Scope.ID, scopeStatus)
+	}
+	fmt.Fprintf(sb, `<span class="chip mono">%s</span>`, html.EscapeString(scopeText))
+	fmt.Fprintf(sb, `<span class="chip mono">snapshot %s</span>`, html.EscapeString(v.GeneratedAt.Format("2006-01-02 15:04")))
+	fmt.Fprintf(sb, `<span class="chip mono">%s</span>`, html.EscapeString(v.EventsPath))
+	sb.WriteString(`</div></div>`)
+	sb.WriteString(`<div class="refresh"><code class="cmd-pill">cst brief</code><code class="cmd-pill primary">cst ui</code></div>`)
+	sb.WriteString(`</header>`)
+}
+
+func renderSummary(sb *strings.Builder, v uiView) {
+	sb.WriteString(`<section class="progress-strip" aria-label="summary">`)
+	renderMetric(sb, "overall progress", fmt.Sprintf("%d%%", v.Summary.PercentDone), fmt.Sprintf("%d/%d done", v.Summary.CompletedTasks, v.Summary.TotalTasks), "Completed historical subtrees stay out of the frontier view.", true)
+	renderMetric(sb, "active phases", fmt.Sprintf("%d", len(v.ActivePhases)), "visible", "One row per active innermost workstream.", false)
+	renderMetric(sb, "open tasks", fmt.Sprintf("%d", v.Summary.OpenTasks), "", fmt.Sprintf("%d claimed, %d held.", v.Summary.ClaimedTasks, v.Summary.HeldTasks), false)
+	renderMetric(sb, "ready now", fmt.Sprintf("%d", v.Summary.ReadyTasks), "legal", "Waiting tasks are not legal actions.", false)
+	renderMetric(sb, "current gate", currentGateValue(v), "", currentGateHint(v), false)
+	renderMetric(sb, "hidden history", fmt.Sprintf("%d", v.CompletedSubtreeTotal), "subtrees", "Use history only for audits.", false)
+	sb.WriteString(`</section>`)
+}
+
+func renderMetric(sb *strings.Builder, label, value, valueMeta, note string, primary bool) {
+	cls := "metric"
+	if primary {
+		cls += " primary"
+	}
+	fmt.Fprintf(sb, `<div class="%s"><div class="label">%s</div><div class="value">%s`, cls, html.EscapeString(label), html.EscapeString(value))
+	if valueMeta != "" {
+		fmt.Fprintf(sb, ` <span>%s</span>`, html.EscapeString(valueMeta))
+	}
+	fmt.Fprintf(sb, `</div><div class="note">%s</div></div>`, html.EscapeString(note))
+}
+
+func renderPhaseSection(sb *strings.Builder, v uiView) {
+	sb.WriteString(`<section class="phase-section">`)
+	sb.WriteString(`<div class="section-head"><div><h2>Stage Completion</h2><div class="sub">Click a phase to inspect progress equation, dependency chain, and task matrix.</div></div><div class="mono">frontier projection</div></div>`)
+	if len(v.ActivePhases) == 0 {
+		sb.WriteString(`<div class="empty">所有 goal 已收敛，没有进行中的任务。</div>`)
+	} else {
+		for i, phase := range v.ActivePhases {
+			renderPhase(sb, phase, i == 0)
+		}
+	}
+	sb.WriteString(`</section>`)
+}
+
+func renderPhase(sb *strings.Builder, phase phaseView, open bool) {
+	statusClass := phaseStatusClass(phase)
+	statusLabel := phaseStatusLabel(phase)
+	blockTitle, blockText := phaseBlocker(phase)
+	openAttr := ""
+	if open {
+		openAttr = " open"
+	}
+	fmt.Fprintf(sb, `<details class="phase" id="phase-%d"%s>`, phase.Node.ID, openAttr)
+	sb.WriteString(`<summary class="phase-row">`)
+	fmt.Fprintf(sb, `<div class="pid mono"><span>#%d</span><span class="badge %s">%s</span></div>`, phase.Node.ID, html.EscapeString(statusClass), html.EscapeString(statusLabel))
+	sb.WriteString(`<div>`)
+	fmt.Fprintf(sb, `<div class="phase-title">%s</div>`, html.EscapeString(phase.Node.Intent))
+	sb.WriteString(`<div class="facts">`)
+	renderCountBadge(sb, "claimed", phase.ClaimTotal)
+	renderCountBadge(sb, "ready", phase.ReadyTotal)
+	renderCountBadge(sb, "review", phase.ReviewReadyTotal)
+	renderCountBadge(sb, "waiting", phase.WaitingTotal)
+	renderCountBadge(sb, "failed", phase.DependencyFailedTotal)
+	renderCountBadge(sb, "held", phase.HeldTotal)
+	sb.WriteString(`</div></div>`)
+	fmt.Fprintf(sb,
+		`<div class="ratio"><div class="ratio-line"><strong>%d%%</strong><span>%d/%d</span></div><div class="bar" style="--pct:%d%%"></div></div>`,
+		phase.Progress.PercentDone, phase.Progress.CompletedTasks, phase.Progress.TotalTasks, phase.Progress.PercentDone)
+	fmt.Fprintf(sb, `<div class="blocker"><strong>%s</strong>%s</div>`, html.EscapeString(blockTitle), html.EscapeString(blockText))
+	sb.WriteString(`</summary>`)
+
+	sb.WriteString(`<div class="phase-detail">`)
+	renderPhaseDetails(sb, phase)
+	renderTaskMatrix(sb, phase)
+	sb.WriteString(`</div></details>`)
+}
+
+func renderCountBadge(sb *strings.Builder, cls string, n int) {
+	if n <= 0 {
 		return
 	}
-	sb.WriteString(`<section class="run-diagnostics">`)
-	if len(v.RecentFailures) > 0 {
-		renderRunList(sb, "recent failures", v.RecentFailures)
-	}
-	if len(v.RecentRuns) > 0 {
-		renderRunList(sb, "recent script_runs", v.RecentRuns)
-	}
-	sb.WriteString(`</section>` + "\n")
+	fmt.Fprintf(sb, `<span class="badge %s">%d %s</span>`, html.EscapeString(cls), n, html.EscapeString(cls))
 }
 
-func renderRunList(sb *strings.Builder, label string, runs []ScriptRunRecord) {
-	fmt.Fprintf(sb, `<div class="run-list"><div class="run-list-title">%s · %d</div>`, html.EscapeString(label), len(runs))
-	for _, r := range runs {
-		renderRunLine(sb, r)
-	}
-	sb.WriteString(`</div>`)
-}
-
-func renderRunLine(sb *strings.Builder, r ScriptRunRecord) {
-	status := `<span class="ok">pass</span>`
-	if r.ExitCode != 0 {
-		status = fmt.Sprintf(`<span class="fail">exit %d</span>`, r.ExitCode)
-	}
-	check := normalizedCheckName(r.CheckName)
+func renderPhaseDetails(sb *strings.Builder, phase phaseView) {
+	sb.WriteString(`<div class="detail-grid">`)
 	fmt.Fprintf(sb,
-		`<div class="run-line"><span class="run-node">#%d</span>%s <span class="trig">%s</span> <span class="trig">%s</span> <code>%s</code> <span class="run-at">%s</span>`,
-		r.NodeID, status, html.EscapeString(r.Trigger), html.EscapeString(check),
-		html.EscapeString(truncate(r.Cmd, 120)), html.EscapeString(humanize(r.At, time.Now())))
-	if r.AttemptID != "" {
-		fmt.Fprintf(sb, ` <code class="cmd">cst events --attempt %s</code>`, html.EscapeString(r.AttemptID))
-	}
-	sb.WriteString(`</div>`)
-}
+		`<div class="detail"><h3>Progress Equation</h3><ul><li>Subtree tasks: %d total, %d terminal, %d open.</li><li>Ready is computed by IsReadyTask, not raw open status.</li><li>Last activity %s.</li></ul></div>`,
+		phase.Progress.TotalTasks,
+		phase.Progress.CompletedTasks+phase.Progress.CanceledTasks,
+		phase.Progress.OpenTasks,
+		html.EscapeString(humanize(phase.LastActivity, time.Now())))
 
-func renderScopeNav(sb *strings.Builder, scopes []scopeView) {
-	sb.WriteString(`<nav class="scope-nav">`)
-	for _, sc := range scopes {
-		intent := truncate(sc.Goal.Intent, 32)
-		fmt.Fprintf(sb,
-			`<a href="#scope-%d">#%d %s <span class="nv-bar"><i style="width:%d%%"></i></span> <span class="nv-frac">%d/%d</span></a>`,
-			sc.Goal.ID, sc.Goal.ID, html.EscapeString(intent), sc.PctDone, sc.Done, sc.Total)
-	}
-	sb.WriteString(`</nav>` + "\n")
-}
-
-func renderScope(sb *strings.Builder, sc scopeView) {
-	now := time.Now()
-	fmt.Fprintf(sb, `<section class="scope" id="scope-%d"><div class="callout info">`, sc.Goal.ID)
-
-	// title bar
-	fmt.Fprintf(sb,
-		`<div class="callout-title"><span class="scope-title"><span class="nid">#%d</span>%s</span><span class="scope-meta">最近活动 %s</span></div>`,
-		sc.Goal.ID, html.EscapeString(sc.Goal.Intent), html.EscapeString(humanize(sc.LastActivity, now)))
-
-	sb.WriteString(`<div class="callout-body">`)
-
-	// crumb
-	if len(sc.Ancestors) > 0 {
-		sb.WriteString(`<div class="crumb">`)
-		bits := make([]string, 0, len(sc.Ancestors))
-		for _, a := range sc.Ancestors {
-			bits = append(bits, fmt.Sprintf(`#%d %s`, a.ID, html.EscapeString(truncate(a.Intent, 40))))
-		}
-		sb.WriteString(strings.Join(bits, " › "))
-		sb.WriteString(` ›</div>`)
-	}
-
-	// progress
-	openCounts := ""
-	statusOrder := []NodeStatus{StatusClaimed, StatusHeld, StatusOpen, StatusCanceled}
-	for _, st := range statusOrder {
-		if n := sc.OpenByStatus[st]; n > 0 {
-			openCounts += fmt.Sprintf(`<span><b>%d</b> %s</span>`, n, statusLabel(st))
+	sb.WriteString(`<div class="detail"><h3>Dependency Chain</h3><ul>`)
+	wrote := false
+	for _, row := range phase.TaskRows {
+		if len(row.WaitingOn) > 0 || len(row.BlockedBy) > 0 {
+			wrote = true
+			fmt.Fprintf(sb, `<li>#%d waits on %s%s.</li>`,
+				row.Node.ID,
+				html.EscapeString(joinIDsBare(row.WaitingOn)),
+				html.EscapeString(blockedSuffix(row.BlockedBy)))
 		}
 	}
-	fmt.Fprintf(sb,
-		`<div class="progress"><div class="bar"><div style="width:%d%%"></div></div>`+
-			`<div class="bar-line"><span><b>%d</b> / %d 任务完成 · %d%%</span><span class="counts">%s</span></div></div>`,
-		sc.PctDone, sc.Done, sc.Total, sc.PctDone, openCounts)
-
-	// rules
-	if len(sc.Rules) > 0 {
-		fmt.Fprintf(sb, `<div class="rules-block"><div class="rules-label">inherited rules · %d</div><ul>`, len(sc.Rules))
-		for _, r := range sc.Rules {
-			text := r.RuleText
-			if text == "" {
-				text = r.Intent
-			}
-			fmt.Fprintf(sb, `<li><span class="rule-id">#%d</span> %s</li>`, r.ID, html.EscapeString(text))
-		}
-		sb.WriteString(`</ul></div>`)
+	if !wrote {
+		sb.WriteString(`<li>No prerequisite wait edge in the shown task rows.</li>`)
 	}
+	sb.WriteString(`</ul></div>`)
 
-	// sub-scope nav
-	if len(sc.SubGoals) > 0 {
-		sb.WriteString(`<div class="sub-scopes">↳ 子 scope · `)
-		bits := make([]string, 0, len(sc.SubGoals))
-		for _, sg := range sc.SubGoals {
-			label := html.EscapeString(truncate(sg.Intent, 30))
-			if sg.Canceled {
-				bits = append(bits, fmt.Sprintf(`<span class="done-ref">#%d %s</span>`, sg.ID, label))
-			} else {
-				bits = append(bits, fmt.Sprintf(`<a href="#scope-%d">#%d %s</a>`, sg.ID, sg.ID, label))
-			}
-		}
-		sb.WriteString(strings.Join(bits, " · "))
-		sb.WriteString(`</div>`)
-	}
-
-	// task groups
-	var open, done []*Node
-	for _, t := range sc.AllTasks {
-		if t.Completed {
-			done = append(done, t)
-		} else {
-			open = append(open, t)
+	sb.WriteString(`<div class="detail"><h3>Inherited Rules</h3><ul>`)
+	if len(phase.Rules) == 0 {
+		sb.WriteString(`<li>No inherited rule for this phase.</li>`)
+	} else {
+		for _, rule := range phase.Rules {
+			fmt.Fprintf(sb, `<li><span class="mono">#%d</span> %s</li>`, rule.ID, html.EscapeString(rule.RuleText))
 		}
 	}
-	if len(open) > 0 {
-		fmt.Fprintf(sb, `<div class="group-label">未完成 · %d</div>`, len(open))
-		for _, t := range open {
-			renderTask(sb, t)
-		}
+	sb.WriteString(`</ul></div>`)
+
+	sb.WriteString(`<div class="detail"><h3>Useful Reads</h3>`)
+	fmt.Fprintf(sb, `<code class="cmd">cst show %d</code>`, phase.Node.ID)
+	fmt.Fprintf(sb, `<code class="cmd">cst brief --within %d --human</code>`, phase.Node.ID)
+	if firstClaim := firstRowByClass(phase.TaskRows, "claimed"); firstClaim != nil {
+		fmt.Fprintf(sb, `<code class="cmd">cst worker-status %d --human</code>`, firstClaim.Node.ID)
 	}
-	if len(done) > 0 {
-		fmt.Fprintf(sb, `<div class="group-label">已完成 · %d · 按完成时间倒序</div>`, len(done))
-		for _, t := range done {
-			renderTask(sb, t)
-		}
-	}
-
-	sb.WriteString(`</div></div></section>` + "\n")
-}
-
-func renderTask(sb *strings.Builder, t *Node) {
-	now := time.Now()
-	st := t.Status()
-	cls := statusClass(st)
-	lbl := statusLabel(st)
-
-	when := ""
-	switch st {
-	case StatusCompleted:
-		when = "完成 " + humanize(t.CompletedAt, now)
-	case StatusHeld:
-		if t.Hold != nil {
-			when = "挂起 " + humanize(t.Hold.At, now)
-		}
-	case StatusClaimed:
-		if t.Claim != nil {
-			when = "领取 " + humanize(t.Claim.TakenAt, now)
-		}
-	case StatusCanceled:
-		when = "取消 " + humanize(t.CanceledAt, now)
-	case StatusOpen:
-		when = "创建 " + humanize(t.CreatedAt, now)
-	}
-
-	fmt.Fprintf(sb,
-		`<div class="task %s"><div class="task-head"><span class="task-status">%s</span><span class="task-nid">#%d</span><span class="task-title">%s</span><span class="task-when">%s</span></div><div class="task-body">`,
-		cls, lbl, t.ID, html.EscapeString(t.Intent), html.EscapeString(when))
-
-	renderTaskNote(sb, t)
-	renderTaskHoldOrCancel(sb, t)
-	renderTaskCommands(sb, t)
-	renderTaskVerify(sb, t)
-	renderTaskAcceptance(sb, t)
-
 	sb.WriteString(`</div></div>`)
 }
 
-func renderTaskCommands(sb *strings.Builder, t *Node) {
-	cmds := []string{fmt.Sprintf("cst show %d", t.ID)}
-	if attemptID := taskAttemptID(t); attemptID != "" {
-		cmds = append(cmds, fmt.Sprintf("cst events --attempt %s", attemptID))
+func renderTaskMatrix(sb *strings.Builder, phase phaseView) {
+	sb.WriteString(`<table><thead><tr><th>Task</th><th>State</th><th>Acceptance</th><th>Human Value</th></tr></thead><tbody>`)
+	if len(phase.TaskRows) == 0 {
+		sb.WriteString(`<tr><td colspan="4">No task rows in this phase.</td></tr>`)
 	}
-	sb.WriteString(`<div class="commands"><span class="field-label">read commands</span>`)
-	for _, cmd := range cmds {
-		fmt.Fprintf(sb, `<code>%s</code>`, html.EscapeString(cmd))
+	for _, row := range phase.TaskRows {
+		fmt.Fprintf(sb, `<tr><td class="task-name"><span class="mono">#%d</span> %s`, row.Node.ID, html.EscapeString(row.Node.Intent))
+		renderTaskDetail(sb, row)
+		fmt.Fprintf(sb, `</td><td><span class="badge %s">%s</span>`, html.EscapeString(row.StateClass), html.EscapeString(row.StateLabel))
+		if row.StateDetail != "" {
+			fmt.Fprintf(sb, `<div class="state-detail">%s</div>`, html.EscapeString(row.StateDetail))
+		}
+		fmt.Fprintf(sb, `</td><td>%s</td><td>%s</td></tr>`, html.EscapeString(firstNonEmpty(row.Acceptance, "none")), html.EscapeString(taskHumanValue(row)))
+	}
+	if phase.TaskRowsTotal > len(phase.TaskRows) {
+		fmt.Fprintf(sb, `<tr><td colspan="4" class="table-more">showing %d/%d task rows</td></tr>`, len(phase.TaskRows), phase.TaskRowsTotal)
+	}
+	sb.WriteString(`</tbody></table>`)
+}
+
+func renderTaskDetail(sb *strings.Builder, row taskRowView) {
+	sb.WriteString(`<details class="task-detail">`)
+	sb.WriteString(`<summary>details</summary>`)
+	fmt.Fprintf(sb, `<p>%s</p>`, html.EscapeString(taskHumanValue(row)))
+	if len(row.Commands) > 0 {
+		sb.WriteString(`<p>`)
+		for _, cmd := range row.Commands {
+			fmt.Fprintf(sb, `<code class="cmd">%s</code>`, html.EscapeString(cmd))
+		}
+		sb.WriteString(`</p>`)
+	}
+	if row.LatestRun != nil {
+		fmt.Fprintf(sb, `<p>latest run: %s exit=%d%s · %s</p>`,
+			html.EscapeString(row.LatestRun.Trigger),
+			row.LatestRun.ExitCode,
+			html.EscapeString(checkSuffix(row.LatestRun.CheckName)),
+			html.EscapeString(truncate(row.LatestRun.Cmd, 120)))
+	}
+	if row.Evidence != nil && row.Evidence.Summary != "" {
+		fmt.Fprintf(sb, `<p>latest evidence: %s · %s</p>`, html.EscapeString(row.Evidence.Kind), html.EscapeString(row.Evidence.Summary))
+	}
+	sb.WriteString(`</details>`)
+}
+
+func renderSide(sb *strings.Builder, v uiView) {
+	sb.WriteString(`<aside class="side">`)
+	sb.WriteString(`<div class="side-block"><h2>Reading Model</h2><div class="kv">`)
+	fmt.Fprintf(sb, `<div>main signal</div><div class="v">phase completion</div>`)
+	fmt.Fprintf(sb, `<div>done</div><div class="v mono">%d / %d</div>`, v.Summary.CompletedTasks, v.Summary.TotalTasks)
+	fmt.Fprintf(sb, `<div>remaining</div><div class="v mono">%d open</div>`, v.Summary.OpenTasks)
+	fmt.Fprintf(sb, `<div>next unlock</div><div class="v mono">%s</div>`, html.EscapeString(currentGateValue(v)))
+	sb.WriteString(`</div></div>`)
+
+	sb.WriteString(`<div class="side-block"><h2>Current Claim</h2>`)
+	if len(v.CurrentClaims) == 0 {
+		sb.WriteString(`<div class="side-muted">No current claim.</div>`)
+	} else {
+		c := v.CurrentClaims[0]
+		sb.WriteString(`<div class="kv">`)
+		fmt.Fprintf(sb, `<div>task</div><div class="v mono">#%d</div>`, c.ID)
+		fmt.Fprintf(sb, `<div>actor</div><div class="v">%s</div>`, html.EscapeString(c.Claim.Actor))
+		fmt.Fprintf(sb, `<div>attempt</div><div class="v mono">%s</div>`, html.EscapeString(c.Claim.AttemptID))
+		fmt.Fprintf(sb, `<div>lease</div><div class="v mono">%s</div>`, html.EscapeString(c.Claim.LeaseExpiresAt.Format(time.RFC3339)))
+		sb.WriteString(`</div>`)
 	}
 	sb.WriteString(`</div>`)
+
+	sb.WriteString(`<div class="side-block"><h2>Recent Evidence</h2><ul class="event-list">`)
+	fmt.Fprintf(sb, `<li><strong>last event</strong><span class="mono">%s</span></li>`, html.EscapeString(humanize(v.LastEvent, v.GeneratedAt)))
+	if len(v.RecentFailures) == 0 {
+		sb.WriteString(`<li><strong>active failures</strong>None shown in the active frontier sample.</li>`)
+	} else {
+		for _, r := range v.RecentFailures {
+			fmt.Fprintf(sb, `<li><strong>#%d failure</strong>%s exit=%d%s</li>`, r.NodeID, html.EscapeString(r.Trigger), r.ExitCode, html.EscapeString(checkSuffix(r.CheckName)))
+		}
+	}
+	if len(v.RecentDone) > 0 {
+		fmt.Fprintf(sb, `<li><strong>recent done</strong><span class="mono">%s</span></li>`, html.EscapeString(joinIDs(v.RecentDone)))
+	}
+	sb.WriteString(`</ul></div>`)
+
+	sb.WriteString(`<div class="side-block"><h2>Invariant</h2><div class="kv">`)
+	sb.WriteString(`<div>truth</div><div class="v mono">.cst/events.jsonl</div>`)
+	sb.WriteString(`<div>projection</div><div class="v">phase progress plus frontier categories</div>`)
+	sb.WriteString(`<div>no state</div><div class="v">native details only; no UI-owned task memory</div>`)
+	sb.WriteString(`</div></div>`)
+	sb.WriteString(`</aside>`)
+}
+
+func currentGateSentence(v uiView) string {
+	if len(v.CurrentClaims) > 0 {
+		return fmt.Sprintf("Task #%d is holding the next phase unlock", v.CurrentClaims[0].ID)
+	}
+	for _, phase := range v.ActivePhases {
+		if row := firstRowByClass(phase.TaskRows, "ready"); row != nil {
+			return fmt.Sprintf("Task #%d is ready", row.Node.ID)
+		}
+		if row := firstRowByClass(phase.TaskRows, "review"); row != nil {
+			return fmt.Sprintf("Review task #%d is ready", row.Node.ID)
+		}
+	}
+	return "No legal action is currently available"
+}
+
+func currentGateValue(v uiView) string {
+	if len(v.CurrentClaims) > 0 {
+		return fmt.Sprintf("#%d", v.CurrentClaims[0].ID)
+	}
+	for _, phase := range v.ActivePhases {
+		if row := firstRowByClass(phase.TaskRows, "ready"); row != nil {
+			return fmt.Sprintf("#%d", row.Node.ID)
+		}
+		if row := firstRowByClass(phase.TaskRows, "review"); row != nil {
+			return fmt.Sprintf("#%d", row.Node.ID)
+		}
+	}
+	return "none"
+}
+
+func currentGateHint(v uiView) string {
+	if len(v.CurrentClaims) > 0 {
+		return "Completion should unlock dependent frontier work."
+	}
+	if v.Summary.ReadyTasks > 0 {
+		return "A legal take/review action is available."
+	}
+	return "No new task can be taken yet."
+}
+
+func firstRowByClass(rows []taskRowView, cls string) *taskRowView {
+	for i := range rows {
+		if rows[i].StateClass == cls {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func taskHumanValue(row taskRowView) string {
+	switch row.StateClass {
+	case "claimed":
+		return "Explains why dependent phase progress is not moving."
+	case "ready", "review":
+		return "Legal frontier action is available."
+	case "waiting":
+		return "Shows the prerequisite that must complete first."
+	case "failed":
+		return "Canceled or missing prerequisite blocks this task."
+	case "held":
+		return "External pause reason must be resolved before progress resumes."
+	case "done":
+		return "Terminal task contributes to phase completion."
+	default:
+		return row.StateDetail
+	}
+}
+
+func blockedSuffix(ids []int64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return " blocked_by=" + joinIDsBare(ids)
+}
+
+func lastEventID(v uiView) string {
+	if v.LastEvent.IsZero() {
+		return "none"
+	}
+	return humanize(v.LastEvent, v.GeneratedAt)
 }
 
 func taskAttemptID(t *Node) string {
@@ -266,221 +407,8 @@ func taskAttemptID(t *Node) string {
 	return ""
 }
 
-func renderTaskNote(sb *strings.Builder, t *Node) {
-	// Pick the evidence referenced by task_completed if it's a real note
-	// (review acceptance). For verify acceptance, the completion points at a
-	// machine witness (script_run on legacy stores, acceptance_run_set on new
-	// stores) that we surface separately, so we instead reach for the most
-	// recent human evidence (the Agent's own note, if any).
-	var ev *EvidenceRecord
-	if t.CompletedEvidence != "" {
-		for i := range t.Evidences {
-			if t.Evidences[i].EventID == t.CompletedEvidence && isHumanEvidenceKind(t.Evidences[i].Kind) {
-				ev = &t.Evidences[i]
-				break
-			}
-		}
-	}
-	if ev == nil {
-		for i := len(t.Evidences) - 1; i >= 0; i-- {
-			if isHumanEvidenceKind(t.Evidences[i].Kind) {
-				ev = &t.Evidences[i]
-				break
-			}
-		}
-	}
-	if ev == nil {
-		return
-	}
-	if ev.Summary != "" {
-		fmt.Fprintf(sb,
-			`<div class="note"><span class="field-label">Agent %s</span>%s</div>`,
-			html.EscapeString(ev.Kind), html.EscapeString(ev.Summary))
-	}
-	if len(ev.Data) > 0 && string(ev.Data) != "null" {
-		renderEvidenceData(sb, ev.Data)
-	}
-}
-
 func isHumanEvidenceKind(kind string) bool {
 	return kind != EvidenceScript && kind != EvidenceAcceptanceRunSet
-}
-
-func renderEvidenceData(sb *strings.Builder, raw json.RawMessage) {
-	// Try to render as an object via dl/dt/dd; fall back to raw pre.
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err == nil && len(obj) > 0 {
-		// preserve a stable order so output is deterministic
-		keys := make([]string, 0, len(obj))
-		for k := range obj {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		sb.WriteString(`<details><summary>evidence_data</summary><dl class="ev-data">`)
-		for _, k := range keys {
-			val := string(obj[k])
-			var s string
-			if err := json.Unmarshal(obj[k], &s); err == nil {
-				val = s
-			}
-			val = truncate(val, 400)
-			fmt.Fprintf(sb, `<dt>%s</dt><dd>%s</dd>`, html.EscapeString(k), html.EscapeString(val))
-		}
-		sb.WriteString(`</dl></details>`)
-		return
-	}
-	pretty := string(raw)
-	if len(pretty) > 800 {
-		pretty = pretty[:800] + "…"
-	}
-	sb.WriteString(`<details><summary>evidence_data</summary><pre>`)
-	sb.WriteString(html.EscapeString(pretty))
-	sb.WriteString(`</pre></details>`)
-}
-
-func renderTaskHoldOrCancel(sb *strings.Builder, t *Node) {
-	if t.Hold != nil {
-		fmt.Fprintf(sb,
-			`<blockquote class="reason"><span class="field-label">挂起 · %s</span>%s</blockquote>`,
-			html.EscapeString(t.Hold.Kind), html.EscapeString(t.Hold.Reason))
-	}
-	if t.Canceled && t.CanceledReason != "" {
-		fmt.Fprintf(sb,
-			`<blockquote class="reason aban"><span class="field-label">取消原因</span>%s</blockquote>`,
-			html.EscapeString(t.CanceledReason))
-	}
-}
-
-func renderTaskVerify(sb *strings.Builder, t *Node) {
-	if len(t.Runs) == 0 {
-		return
-	}
-	last := t.Runs[len(t.Runs)-1]
-	cmd := truncate(last.Cmd, 160)
-	dur := float64(last.DurationMs) / 1000
-	status := `<span class="ok">✓ pass</span>`
-	if last.ExitCode != 0 {
-		status = fmt.Sprintf(`<span class="fail">✕ exit %d</span>`, last.ExitCode)
-	}
-	trig := ""
-	if last.Trigger != "" {
-		trig = fmt.Sprintf(` <span class="trig">%s</span>`, html.EscapeString(last.Trigger))
-	}
-	check := ""
-	if last.CheckName != "" {
-		check = fmt.Sprintf(` <span class="trig">%s</span>`, html.EscapeString(last.CheckName))
-	}
-	count := ""
-	if len(t.Runs) > 1 {
-		count = fmt.Sprintf(` · %d runs`, len(t.Runs))
-	}
-	attempt := ""
-	if last.AttemptID != "" {
-		attempt = fmt.Sprintf(` <code class="cmd">cst events --attempt %s</code>`, html.EscapeString(last.AttemptID))
-	}
-	trunc := ""
-	if last.Truncated {
-		trunc = ` <span class="truncated">truncated</span>`
-	}
-	fmt.Fprintf(sb,
-		`<div class="verify"><span class="field-label">latest script_run</span>%s%s%s · <code>%s</code> · %.1fs%s%s%s</div>`,
-		status, trig, check, html.EscapeString(cmd), dur, count, trunc, attempt)
-
-	if len(t.Runs) > 1 {
-		renderTaskRunDetails(sb, t.Runs)
-	}
-
-	if last.StdoutHead != "" {
-		s := last.StdoutHead
-		if len(s) > 1200 {
-			s = s[:1200] + "…"
-		}
-		fmt.Fprintf(sb, `<details><summary>stdout · %d chars</summary><pre>%s</pre></details>`,
-			len(last.StdoutHead), html.EscapeString(s))
-	}
-	if last.StderrHead != "" {
-		s := last.StderrHead
-		if len(s) > 600 {
-			s = s[:600] + "…"
-		}
-		fmt.Fprintf(sb, `<details><summary>stderr · %d chars</summary><pre>%s</pre></details>`,
-			len(last.StderrHead), html.EscapeString(s))
-	}
-}
-
-func renderTaskRunDetails(sb *strings.Builder, runs []ScriptRunRecord) {
-	sb.WriteString(`<details><summary>script_runs by attempt/check</summary><div class="run-detail">`)
-	start := 0
-	if len(runs) > 8 {
-		start = len(runs) - 8
-		fmt.Fprintf(sb, `<div class="run-more">showing latest 8 of %d</div>`, len(runs))
-	}
-	for i := len(runs) - 1; i >= start; i-- {
-		renderRunLine(sb, runs[i])
-	}
-	sb.WriteString(`</div></details>`)
-}
-
-func renderTaskAcceptance(sb *strings.Builder, t *Node) {
-	// Only show on open tasks; for done tasks the verify line already covers it.
-	if t.Terminal() || t.Acceptance == nil {
-		return
-	}
-	switch t.Acceptance.Kind {
-	case AcceptanceVerify:
-		for _, check := range t.Acceptance.VerifyChecks() {
-			fmt.Fprintf(sb,
-				`<div class="acceptance"><span class="field-label">验收条件 verify.%s</span><code>%s</code></div>`,
-				html.EscapeString(check.Name), html.EscapeString(truncate(check.Cmd, 200)))
-		}
-	case AcceptanceReview:
-		who := t.Acceptance.Who
-		if who == "" {
-			who = "?"
-		}
-		fmt.Fprintf(sb,
-			`<div class="acceptance"><span class="field-label">验收条件 review.who</span><code>%s</code></div>`,
-			html.EscapeString(who))
-	}
-}
-
-func renderFooter(sb *strings.Builder, v uiView) {
-	fmt.Fprintf(sb,
-		`<footer>%d events · %d goal · %d rule · %d task &nbsp;·&nbsp; 重跑 <span class="kbd">cst ui</span> 刷新此快照</footer>`+"\n",
-		v.TotalEvents, v.GoalCount, v.RuleCount, v.TotalTasks)
-}
-
-// statusLabel returns the Chinese display label for a NodeStatus.
-func statusLabel(st NodeStatus) string {
-	switch st {
-	case StatusCompleted:
-		return "已完成"
-	case StatusClaimed:
-		return "进行中"
-	case StatusHeld:
-		return "已挂起"
-	case StatusCanceled:
-		return "已取消"
-	case StatusOpen:
-		return "待领取"
-	}
-	return string(st)
-}
-
-func statusClass(st NodeStatus) string {
-	switch st {
-	case StatusCompleted:
-		return "done"
-	case StatusClaimed:
-		return "claimed"
-	case StatusHeld:
-		return "held"
-	case StatusCanceled:
-		return "abandoned"
-	case StatusOpen:
-		return "ready"
-	}
-	return "ready"
 }
 
 func humanize(t, now time.Time) string {

@@ -20,16 +20,21 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 
 	wantSubstrings := []string{
 		`<!doctype html>`,
-		`id="scope-2"`,      // active scope rendered
-		`inherited rules`,   // rules block heading
-		`#3`,                // open task id
-		`已完成`,               // completed task label
-		`已挂起`,               // held task label
-		`挂起 · waiting`,      // hold kind + label
-		`block reason text`, // hold reason
-		`latest script_run`, // verify field label
-		`Agent note`,        // evidence summary kind label
-		`<style>`,           // inline CSS
+		`CST Progress`,
+		`id="phase-2"`,
+		`Stage Completion`,
+		`Progress Equation`,
+		`Inherited Rules`,
+		`rules of the phase`,
+		`<th>Task</th><th>State</th><th>Acceptance</th><th>Human Value</th>`,
+		`Pending task`,
+		`Finished task`,
+		`Stuck task`,
+		`<span class="badge done">completed</span>`,
+		`<span class="badge held">held</span>`,
+		`waiting: block reason text`,
+		`latest evidence: note · did the thing`,
+		`<style>`,
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(html, want) {
@@ -68,15 +73,15 @@ func TestRenderHTML_AttemptNamedChecksAndInheritedRules(t *testing.T) {
 	html := renderHTML(v)
 
 	wantSubstrings := []string{
-		`recent failures`,
-		`recent script_runs`,
-		`inherited rules`,
+		`Recent Evidence`,
+		`#4 failure`,
+		`Inherited Rules`,
 		`root invariant`,
 		`verify.unit`,
 		`verify.lint`,
-		`script_runs by attempt/check`,
-		`2 runs`,
+		`latest run: probe exit=1 check=lint · false`,
 		`cst show 4`,
+		`cst worker-status 4 --human`,
 		`cst events --attempt ` + attemptID,
 	}
 	for _, want := range wantSubstrings {
@@ -86,6 +91,64 @@ func TestRenderHTML_AttemptNamedChecksAndInheritedRules(t *testing.T) {
 	}
 	if strings.Contains(html, "次重试") {
 		t.Errorf("named checks must not be labeled as retries")
+	}
+}
+
+func TestRenderHTML_AfterDependencyIsWaitingNotReady(t *testing.T) {
+	withTempStore(t)
+	mustDoAdd(t, AddArgs{Intent: "Root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Prerequisite task", AcceptanceVerify: "true"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Dependent task", AcceptanceVerify: "true", After: []int64{3}})
+
+	state := replayState(t)
+	if state.IsReadyTask(4) {
+		t.Fatal("dependent task should not be ready before prerequisite completes")
+	}
+	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
+	html := renderHTML(v)
+	row := htmlRowContaining(t, html, "Dependent task")
+
+	wantSubstrings := []string{
+		`<span class="badge waiting">waiting</span>`,
+		`after=3`,
+		`Shows the prerequisite that must complete first.`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(row, want) {
+			t.Errorf("dependent row missing %q\n--- row ---\n%s", want, row)
+		}
+	}
+	if strings.Contains(row, `legal take action`) || strings.Contains(row, `badge ready`) {
+		t.Errorf("dependent row was projected as ready\n--- row ---\n%s", row)
+	}
+	if strings.Contains(html, "待领取") {
+		t.Errorf("html must not use raw-open ready wording")
+	}
+}
+
+func TestRenderHTML_ReviewReadyIsNotDoubleCountedAsReady(t *testing.T) {
+	withTempStore(t)
+	mustDoAdd(t, AddArgs{Intent: "Root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Review task", AcceptanceReview: "self"})
+
+	state := replayState(t)
+	if !state.IsReadyTask(3) {
+		t.Fatal("review task should be ready")
+	}
+	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
+	html := renderHTML(v)
+	row := htmlRowContaining(t, html, `<span class="mono">#3</span> Review task`)
+
+	if !strings.Contains(row, `<span class="badge review">review ready</span>`) {
+		t.Errorf("review row missing review-ready badge\n--- row ---\n%s", row)
+	}
+	if !strings.Contains(html, `<span class="badge review">1 review</span>`) {
+		t.Errorf("phase facts missing review count\n--- html ---\n%s", head(html, 3000))
+	}
+	if strings.Contains(html, `<span class="badge ready">1 ready</span>`) {
+		t.Errorf("review-ready task was double-counted as ready")
 	}
 }
 
@@ -169,6 +232,35 @@ func TestDoUI_Stdout(t *testing.T) {
 	// File must not exist when --stdout
 	if _, err := os.Stat(filepath.Join(StoreDir(), "ui.html")); !os.IsNotExist(err) {
 		t.Errorf("expected no file when --stdout, got %v", err)
+	}
+}
+
+func TestDoUI_ProjectNameUsesConfiguredStoreRoot(t *testing.T) {
+	cwdStore := withTempStore(t)
+	otherStore := filepath.Join(t.TempDir(), "agentOS")
+	if err := SetStoreRoot(otherStore); err != nil {
+		t.Fatalf("SetStoreRoot: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := SetStoreRoot(""); err != nil {
+			t.Fatalf("reset store root: %v", err)
+		}
+	})
+	mustDoAdd(t, AddArgs{Intent: "Root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Task", AcceptanceVerify: "true"})
+
+	out := &bytes.Buffer{}
+	err := DoUI(out, UIArgs{Stdout: true, NoOpen: true}, true)
+	if err != nil {
+		t.Fatalf("DoUI: %v", err)
+	}
+	html := out.String()
+	if !strings.Contains(html, `<h1>agentOS CST</h1>`) {
+		t.Errorf("html did not use configured store root name\n%s", head(html, 1500))
+	}
+	if strings.Contains(html, `<h1>`+filepath.Base(cwdStore)+` CST</h1>`) {
+		t.Errorf("html used cwd store name instead of configured store root")
 	}
 }
 
@@ -293,6 +385,20 @@ func head(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func htmlRowContaining(t *testing.T, html, needle string) string {
+	t.Helper()
+	idx := strings.Index(html, needle)
+	if idx < 0 {
+		t.Fatalf("html missing row needle %q\n%s", needle, head(html, 2000))
+	}
+	start := strings.LastIndex(html[:idx], "<tr>")
+	endRel := strings.Index(html[idx:], "</tr>")
+	if start < 0 || endRel < 0 {
+		t.Fatalf("could not isolate row containing %q", needle)
+	}
+	return html[start : idx+endRel+len("</tr>")]
 }
 
 // errorsAs is a tiny std-free errors.As to keep test deps unchanged.

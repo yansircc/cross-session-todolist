@@ -120,16 +120,19 @@ func renderOnce(within int64) (renderResult, error) {
 			return renderResult{}, herr(ExitNotFound, "node #%d not found", within)
 		}
 	}
-	cwd, _ := os.Getwd()
-	project := filepath.Base(cwd)
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		return renderResult{}, err
+	}
+	project := filepath.Base(paths.Root)
 	var lastEvent time.Time
 	if len(events) > 0 {
 		lastEvent = events[len(events)-1].Timestamp
 	}
-	v := uiViewFrom(state, within, EventsPath(), project, len(events), lastEvent)
+	v := uiViewFrom(state, within, paths.EventsPath, project, len(events), lastEvent)
 	return renderResult{
 		html:         renderHTML(v),
-		activeScopes: len(v.ActiveScopes),
-		openTasks:    v.OpenTasks,
+		activeScopes: len(v.ActivePhases),
+		openTasks:    v.Summary.OpenTasks,
 	}, nil
 }
