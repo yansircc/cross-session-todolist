@@ -39,6 +39,28 @@ func TestBoundaryPartitionRejectsSiblingOverlap(t *testing.T) {
 	}
 }
 
+func TestBoundaryPartitionAllowsCompletedSiblingPathReuse(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root", Boundary: &NodeBoundary{Owned: []string{"."}}},
+		{EventID: "a", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "a", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"src"}}},
+		{EventID: "claim-a", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			NodeID: 2, AttemptID: "attempt-a", LeaseID: "lease-a", LeaseExpiresAt: &exp},
+		{EventID: "evidence-a", Timestamp: now, Actor: "a", Type: EvEvidence,
+			NodeID: 2, AttemptID: "attempt-a", EvidenceKind: EvidenceNote, EvidenceSummary: "reviewed"},
+		{EventID: "done-a", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			NodeID: 2, AttemptID: "attempt-a", EvidenceIDs: []string{"evidence-a"}},
+		{EventID: "b", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 3, ParentID: 1, Kind: KindTask, Intent: "b", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"src/lib"}}},
+	}
+	if _, err := Apply(events); err != nil {
+		t.Fatalf("expected completed sibling boundary reuse to pass, got %v", err)
+	}
+}
+
 func TestDoneRejectsNodeBoundaryOwnedViolation(t *testing.T) {
 	dir := withTempStore(t)
 	initGitRepo(t, dir)

@@ -5,7 +5,7 @@ import "fmt"
 func (s *State) validateBoundaryPartition() error {
 	for _, id := range s.Order {
 		n := s.Nodes[id]
-		if n == nil || n.Canceled || n.Boundary == nil || len(n.Boundary.Owned) == 0 {
+		if !participatesInBoundaryPartition(n) {
 			continue
 		}
 		if n.ParentID != 0 {
@@ -26,12 +26,12 @@ func (s *State) validateBoundaryPartition() error {
 		}
 		for i, leftID := range parent.Children {
 			left := s.Nodes[leftID]
-			if left == nil || left.Canceled || left.Boundary == nil || len(left.Boundary.Owned) == 0 {
+			if !participatesInBoundaryPartition(left) {
 				continue
 			}
 			for _, rightID := range parent.Children[i+1:] {
 				right := s.Nodes[rightID]
-				if right == nil || right.Canceled || right.Boundary == nil || len(right.Boundary.Owned) == 0 {
+				if !participatesInBoundaryPartition(right) {
 					continue
 				}
 				if pathsOverlap(left.Boundary.Owned, right.Boundary.Owned) {
@@ -41,6 +41,10 @@ func (s *State) validateBoundaryPartition() error {
 		}
 	}
 	return nil
+}
+
+func participatesInBoundaryPartition(n *Node) bool {
+	return n != nil && !n.Terminal() && n.Boundary != nil && len(n.Boundary.Owned) > 0
 }
 
 func validateNodeBoundaryCompletion(n *Node, runSet EvidenceRecord) error {
