@@ -3,6 +3,7 @@ package cst
 import (
 	"fmt"
 	"html"
+	"sort"
 	"strings"
 )
 
@@ -72,7 +73,7 @@ func renderPhase(sb *strings.Builder, phase phaseView) {
 
 func renderPhaseSteps(sb *strings.Builder, phase phaseView) {
 	sb.WriteString(`<div class="steps" aria-label="task progress">`)
-	for _, row := range phase.TaskRows {
+	for _, row := range progressStepRows(phase.TaskRows) {
 		class := "step"
 		if stateClass := stepClass(row); stateClass != "" {
 			class += " " + stateClass
@@ -82,6 +83,14 @@ func renderPhaseSteps(sb *strings.Builder, phase phaseView) {
 			html.EscapeString(class), html.EscapeString(rowRadioID(phase, row)), row.Node.ID, row.Node.ID)
 	}
 	sb.WriteString(`</div>`)
+}
+
+func progressStepRows(rows []taskRowView) []taskRowView {
+	out := append([]taskRowView(nil), rows...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Node.ID < out[j].Node.ID
+	})
+	return out
 }
 
 func renderPhaseRadios(sb *strings.Builder, phase phaseView) {

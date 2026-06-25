@@ -3,6 +3,7 @@ package cst
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -185,6 +186,35 @@ func TestRenderHTML_PhasesUseLedgerOrderNotLastActivity(t *testing.T) {
 	second := strings.Index(html, `id="phase-3"`)
 	if first < 0 || second < 0 || first > second {
 		t.Errorf("rendered phases should follow ledger order\n%s", head(html, 3000))
+	}
+}
+
+func TestRenderHTML_ProgressStepsUseTaskOrderNotActionPriority(t *testing.T) {
+	withTempStore(t)
+	mustDoAdd(t, AddArgs{Intent: "Root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Done first", AcceptanceVerify: "true"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Done second", AcceptanceVerify: "true"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Ready now", AcceptanceVerify: "true"})
+
+	mustDoTake(t, 3)
+	mustDoDone(t, 3)
+	mustDoTake(t, 4)
+	mustDoDone(t, 4)
+
+	state := replayState(t)
+	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
+	html := renderHTML(v)
+	steps := htmlStepsForPhase(t, html, 2)
+
+	first := strings.Index(steps, `for="phase-2-task-3"`)
+	second := strings.Index(steps, `for="phase-2-task-4"`)
+	third := strings.Index(steps, `for="phase-2-task-5"`)
+	if first < 0 || second < 0 || third < 0 || !(first < second && second < third) {
+		t.Fatalf("progress steps must follow task order, got\n%s", steps)
+	}
+	if !strings.Contains(html, `<input class="task-radio" type="radio" name="phase-2-task" id="phase-2-task-5" checked>`) {
+		t.Fatalf("default selected detail should still be action-priority ready task\n%s", head(html, 3000))
 	}
 }
 
@@ -435,6 +465,24 @@ func htmlArticleContaining(t *testing.T, html, needle string) string {
 		t.Fatalf("could not isolate article containing %q", needle)
 	}
 	return html[start : idx+endRel+len("</article>")]
+}
+
+func htmlStepsForPhase(t *testing.T, html string, phaseID int64) string {
+	t.Helper()
+	phaseStart := strings.Index(html, fmt.Sprintf(`id="phase-%d"`, phaseID))
+	if phaseStart < 0 {
+		t.Fatalf("html missing phase #%d\n%s", phaseID, head(html, 2000))
+	}
+	startRel := strings.Index(html[phaseStart:], `<div class="steps"`)
+	if startRel < 0 {
+		t.Fatalf("html missing steps for phase #%d\n%s", phaseID, head(html[phaseStart:], 2000))
+	}
+	start := phaseStart + startRel
+	endRel := strings.Index(html[start:], `</div>`)
+	if endRel < 0 {
+		t.Fatalf("could not isolate steps for phase #%d", phaseID)
+	}
+	return html[start : start+endRel+len(`</div>`)]
 }
 
 // errorsAs is a tiny std-free errors.As to keep test deps unchanged.
