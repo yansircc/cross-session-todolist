@@ -130,6 +130,36 @@ cst add --parent 1 --goal --intent "Workstream"
 cst add --parent 1 --rule "One fact, one location"
 ```
 
+Node-local context/boundary/obligations are one generator. Put durable global
+context high in the tree and local deltas on the node that owns them; descendants
+derive briefing by root-to-node projection, not by storing a workstream pointer:
+
+```sh
+cst add --parent 1 --goal --intent "Parser migration" \
+  --invariant "Parser API stays source-compatible" \
+  --non-goal "Do not rewrite runtime loaders" \
+  --success-obligation parser-contract
+```
+
+Boundary is a task-tree partition, not the execution `--scope`. Declare it once
+on the node and let CST reuse it for briefing and verify completion checks:
+
+```sh
+cst add --parent 2 --intent "Port parser declaration emit" \
+  --owned internal/parser --excluded internal/runtime \
+  --obligation-claim parser-contract \
+  --check unit="go test ./internal/parser"
+```
+
+- child `owned` paths must be inside parent `owned` paths when the parent has a
+  declared owned boundary.
+- sibling `owned` paths cannot overlap.
+- verify completion rejects accepted diffs outside the task `owned` boundary or
+  inside its `excluded` boundary.
+- named `success_obligations` in a subtree must be covered by descendant static
+  leaf task `obligation_claims`; missing coverage is projected and keeps goals
+  open.
+
 Tasks need exactly one acceptance kind:
 
 ```sh
@@ -147,6 +177,12 @@ Use `--after <id>` for internal sequencing. Reserve `hold` for external pauses.
 
 Correct tree shape with `revise`; do not create duplicate replacement tasks when
 identity should be preserved.
+
+Before implementation, use `cst show`, `cst take`, `cst worker-status`, or
+`cst ui` to read the developer briefing. The briefing includes root-to-node
+context fold, local boundary, upstream/downstream edges, local acceptance,
+obligation claims, success coverage, and partition warnings. This projection
+makes global context recoverable; it does not prove the agent understood prose.
 
 ## Verifier Contracts
 

@@ -60,6 +60,7 @@ type WorkerStatusView struct {
 	Status               string                    `json:"status"`
 	Claim                *WorkerClaimView          `json:"claim,omitempty"`
 	ExecutionEnvelope    ExecutionEnvelope         `json:"execution_envelope"`
+	Briefing             *DeveloperBriefing        `json:"briefing,omitempty"`
 	Actions              []BoundAction             `json:"actions"`
 	ExternalObservations WorkerExternalObservation `json:"external_observations"`
 }
@@ -103,6 +104,7 @@ func BuildWorkerStatus(input FrontierInput) (WorkerStatusView, error) {
 		Actor:             input.Actor,
 		Status:            string(input.State.NodeStatus(n)),
 		ExecutionEnvelope: env,
+		Briefing:          BuildDeveloperBriefing(input.State, input.TaskID),
 		Actions:           LegalFrontier(input),
 		ExternalObservations: WorkerExternalObservation{
 			Subagents:  "unknown",
@@ -303,6 +305,7 @@ func RenderWorkerStatusText(w io.Writer, view WorkerStatusView) {
 		}
 		fmt.Fprintf(w, "claim: actor=%s attempt=%s lease=%s%s\n", view.Claim.Actor, view.Claim.AttemptID, view.Claim.LeaseID, stale)
 	}
+	RenderDeveloperBriefingText(w, view.Briefing)
 	fmt.Fprintf(w, "subagents: %s observed_at=%s\n", view.ExternalObservations.Subagents, view.ExternalObservations.ObservedAt.Format(time.RFC3339))
 	if len(view.Actions) == 0 {
 		fmt.Fprintln(w, "actions: none")

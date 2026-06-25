@@ -141,7 +141,7 @@ func (s *State) NodeStatus(n *Node) NodeStatus {
 		return StatusCanceled
 	}
 	p := s.SubtreeProgress(n.ID)
-	if p.OpenTasks == 0 {
+	if p.OpenTasks == 0 && len(s.ObligationCoverage(n.ID).Missing) == 0 {
 		return StatusCompleted
 	}
 	return StatusOpen

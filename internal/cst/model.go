@@ -101,19 +101,25 @@ type Attempt struct {
 }
 
 type Node struct {
-	ID                int64              `json:"id"`
-	ParentID          int64              `json:"parent_id,omitempty"`
-	Kind              string             `json:"kind"`
-	Intent            string             `json:"intent,omitempty"`
-	RuleText          string             `json:"rule_text,omitempty"`
-	Acceptance        *Acceptance        `json:"acceptance,omitempty"`
-	Envelope          *ExecutionEnvelope `json:"execution_envelope,omitempty"`
-	After             []int64            `json:"after,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
-	CreatedBy         string             `json:"created_by"`
-	CreatedEventID    string             `json:"created_event_id,omitempty"`
-	AcceptanceEventAt time.Time          `json:"acceptance_event_at,omitempty"`
-	EnvelopeEventAt   time.Time          `json:"envelope_event_at,omitempty"`
+	ID                      int64              `json:"id"`
+	ParentID                int64              `json:"parent_id,omitempty"`
+	Kind                    string             `json:"kind"`
+	Intent                  string             `json:"intent,omitempty"`
+	RuleText                string             `json:"rule_text,omitempty"`
+	Acceptance              *Acceptance        `json:"acceptance,omitempty"`
+	Envelope                *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	Context                 *NodeContext       `json:"context,omitempty"`
+	Boundary                *NodeBoundary      `json:"boundary,omitempty"`
+	ObligationClaims        []string           `json:"obligation_claims,omitempty"`
+	After                   []int64            `json:"after,omitempty"`
+	CreatedAt               time.Time          `json:"created_at"`
+	CreatedBy               string             `json:"created_by"`
+	CreatedEventID          string             `json:"created_event_id,omitempty"`
+	AcceptanceEventAt       time.Time          `json:"acceptance_event_at,omitempty"`
+	EnvelopeEventAt         time.Time          `json:"envelope_event_at,omitempty"`
+	ContextEventAt          time.Time          `json:"context_event_at,omitempty"`
+	BoundaryEventAt         time.Time          `json:"boundary_event_at,omitempty"`
+	ObligationClaimsEventAt time.Time          `json:"obligation_claims_event_at,omitempty"`
 
 	Children []int64 `json:"children,omitempty"`
 

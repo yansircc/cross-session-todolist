@@ -309,6 +309,9 @@ func changedPathsForAcceptanceRunSet(n *Node, runSet EvidenceRecord) ([]string, 
 		}
 		gitKnown = true
 		for _, path := range changedPathsFromStatus(run.GitStatusShort) {
+			if isCSTStorePath(path) {
+				continue
+			}
 			seen[path] = true
 		}
 	}
@@ -354,4 +357,9 @@ func changedPathsFromStatus(raw string) []string {
 		out = append(out, strings.Trim(path, `"`))
 	}
 	return out
+}
+
+func isCSTStorePath(path string) bool {
+	path = strings.Trim(strings.TrimPrefix(path, "./"), "/")
+	return path == StoreDirName || strings.HasPrefix(path, StoreDirName+"/")
 }

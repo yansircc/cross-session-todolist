@@ -105,20 +105,26 @@ type Event struct {
 	Type      string    `json:"type"`
 	AttemptID string    `json:"attempt_id,omitempty"`
 
-	NodeID     int64              `json:"node_id,omitempty"`
-	ParentID   int64              `json:"parent_id,omitempty"`
-	Kind       string             `json:"kind,omitempty"`
-	Intent     string             `json:"intent,omitempty"`
-	RuleText   string             `json:"rule_text,omitempty"`
-	Acceptance *Acceptance        `json:"acceptance,omitempty"`
-	Envelope   *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	NodeID           int64              `json:"node_id,omitempty"`
+	ParentID         int64              `json:"parent_id,omitempty"`
+	Kind             string             `json:"kind,omitempty"`
+	Intent           string             `json:"intent,omitempty"`
+	RuleText         string             `json:"rule_text,omitempty"`
+	Acceptance       *Acceptance        `json:"acceptance,omitempty"`
+	Envelope         *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	Context          *NodeContext       `json:"context,omitempty"`
+	Boundary         *NodeBoundary      `json:"boundary,omitempty"`
+	ObligationClaims []string           `json:"obligation_claims,omitempty"`
 	// COMPAT: failure_model=stores created before the acceptance/prerequisite split
 	// persisted task acceptance under "gate"; redesign_blocker=old append-only stores
 	// cannot be rewritten safely by readers; removal_condition=all installed stores
 	// have passed an explicit gate-to-acceptance migration.
-	LegacyGate *LegacyGate `json:"gate,omitempty"`
-	After      []int64     `json:"after,omitempty"`
-	AfterSet   bool        `json:"after_set,omitempty"`
+	LegacyGate          *LegacyGate `json:"gate,omitempty"`
+	After               []int64     `json:"after,omitempty"`
+	AfterSet            bool        `json:"after_set,omitempty"`
+	ContextSet          bool        `json:"context_set,omitempty"`
+	BoundarySet         bool        `json:"boundary_set,omitempty"`
+	ObligationClaimsSet bool        `json:"obligation_claims_set,omitempty"`
 
 	LeaseID        string     `json:"lease_id,omitempty"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`

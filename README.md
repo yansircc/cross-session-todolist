@@ -81,7 +81,8 @@ attempt = claim-scoped correlation id for run/evidence/completion events
 ```
 
 Goals are not taken or completed directly. A goal is complete when every
-descendant task is completed or canceled.
+descendant task is completed or canceled and every declared success obligation
+in the subtree is covered by descendant leaf task obligation claims.
 
 Tasks are the unit of execution. A task can be claimed, probed, held, completed,
 or canceled.
@@ -93,6 +94,43 @@ external current-state file.
 
 Rules are context. `brief` and `show` project inherited rules so the next agent
 does not need to rediscover stable constraints.
+
+## Node Context, Boundary, And Obligations
+
+Context is node-local. Put global context high in the tree and local deltas on
+the leaf or subtask that owns them. `show`, `take`, `worker-status`, and `ui`
+derive a developer briefing by walking root to node; descendants do not store a
+workstream pointer.
+
+```sh
+cst add --parent 1 --goal --intent "Parser migration" \
+  --invariant "Parser API stays source-compatible" \
+  --non-goal "Do not rewrite runtime loaders" \
+  --success-obligation parser-contract
+```
+
+Boundary is also node-local and declared once. It is used both in briefing and
+completion validation.
+
+```sh
+cst add --parent 2 --intent "Port parser declaration emit" \
+  --owned internal/parser --excluded internal/runtime \
+  --obligation-claim parser-contract \
+  --check unit="go test ./internal/parser"
+```
+
+Reducer-checked boundary algebra:
+
+- child `owned` paths must sit inside parent `owned` paths when the parent has
+  an owned boundary;
+- sibling `owned` paths must not overlap;
+- verify completion rejects accepted diffs outside the task's `owned` boundary
+  or inside its `excluded` boundary.
+
+Success coverage is a named set relation. The union of `success_obligations`
+declared in a subtree must be covered by descendant static leaf task
+`obligation_claims`; missing coverage is projected in briefing and keeps the
+goal open. This proves set coverage, not human understanding.
 
 ## Agent Loop
 
@@ -106,10 +144,16 @@ Then follow this loop:
 
 ```sh
 cst take                 # claim the next ready task
-cst show <task-id>       # inspect full context
+cst show <task-id>       # inspect root-to-node briefing and local contract
 cst run <task-id>        # optional probe; records script_run(trigger=probe)
 cst done <task-id>       # verify acceptance runs its command and records evidence
 ```
+
+`take`, `show`, `worker-status`, and `ui` all project the same developer
+briefing: root-to-node context fold, local boundary, direct upstream/downstream
+edges, acceptance obligation claims, success coverage, and partition warnings.
+This makes global context visible before implementation; it does not prove the
+developer understood it.
 
 If a task cannot continue now:
 
@@ -146,8 +190,9 @@ empty.
 cst add  --intent "Root goal"
 cst add  --parent <id> --goal --intent "Child goal / workstream"
 cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]
+cst add  ... [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--owned <path>] [--excluded <path>] [--obligation-claim <name>]
 cst add  --parent <id> --rule "Invariant or context visible to agents"
-cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--after <id> ... | --clear-after] [--reason "..."]
+cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--clear-context] [--owned <path>] [--excluded <path>] [--clear-boundary] [--obligation-claim <name> | --clear-obligation-claims] [--after <id> ... | --clear-after] [--reason "..."]
 
 cst brief [--within <id>] [--history]
 cst claims [--within <id>]

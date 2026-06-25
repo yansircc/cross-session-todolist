@@ -40,6 +40,7 @@ type uiView struct {
 
 type phaseView struct {
 	Node         *Node
+	Briefing     *DeveloperBriefing
 	Ancestors    []*Node
 	Rules        []*Node
 	Progress     Progress
@@ -58,6 +59,7 @@ type phaseView struct {
 
 type taskRowView struct {
 	Node        *Node
+	Briefing    *DeveloperBriefing
 	StateClass  string
 	StateLabel  string
 	StateDetail string
@@ -156,6 +158,7 @@ func buildPhaseView(s *State, n *Node) phaseView {
 	}
 	p := phaseView{
 		Node:         n,
+		Briefing:     BuildDeveloperBriefing(s, n.ID),
 		Progress:     s.SubtreeProgress(n.ID),
 		Ancestors:    ancestorGoals(s, n.ID),
 		Rules:        s.InheritedRules(n.ID),
@@ -207,6 +210,7 @@ func buildPhaseTaskRows(s *State, phaseID int64) []taskRowView {
 func buildTaskRow(s *State, n *Node) taskRowView {
 	row := taskRowView{
 		Node:       n,
+		Briefing:   BuildDeveloperBriefing(s, n.ID),
 		Acceptance: taskAcceptanceSummary(n),
 		WaitingOn:  s.WaitingOnIDs(n),
 		BlockedBy:  s.DependencyFailedIDs(n),

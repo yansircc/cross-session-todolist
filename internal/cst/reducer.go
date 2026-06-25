@@ -110,19 +110,26 @@ func (s *State) applyOne(e *Event) error {
 				return fmt.Errorf("goal #%d parent #%d must be a goal", e.NodeID, e.ParentID)
 			}
 		}
+		context, boundary, obligationClaims, err := normalizeNodeDeclarations(e.NodeID, e.Kind, e.Context, e.Boundary, e.ObligationClaims)
+		if err != nil {
+			return fmt.Errorf("node_created #%d invalid node declaration: %w", e.NodeID, err)
+		}
 		n := &Node{
-			ID:             e.NodeID,
-			ParentID:       e.ParentID,
-			Kind:           e.Kind,
-			Intent:         e.Intent,
-			RuleText:       e.RuleText,
-			Acceptance:     e.Acceptance,
-			Envelope:       cloneExecutionEnvelope(e.Envelope),
-			After:          append([]int64(nil), e.After...),
-			CreatedAt:      e.Timestamp,
-			CreatedBy:      e.Actor,
-			CreatedEventID: e.EventID,
-			LastEvent:      e.Timestamp,
+			ID:               e.NodeID,
+			ParentID:         e.ParentID,
+			Kind:             e.Kind,
+			Intent:           e.Intent,
+			RuleText:         e.RuleText,
+			Acceptance:       e.Acceptance,
+			Envelope:         cloneExecutionEnvelope(e.Envelope),
+			Context:          context,
+			Boundary:         boundary,
+			ObligationClaims: obligationClaims,
+			After:            append([]int64(nil), e.After...),
+			CreatedAt:        e.Timestamp,
+			CreatedBy:        e.Actor,
+			CreatedEventID:   e.EventID,
+			LastEvent:        e.Timestamp,
 		}
 		if e.Kind == KindTask && e.Acceptance != nil {
 			n.AcceptanceEventAt = e.Timestamp
@@ -138,6 +145,15 @@ func (s *State) applyOne(e *Event) error {
 			n.Envelope = env
 			n.EnvelopeEventAt = e.Timestamp
 		}
+		if n.Context != nil {
+			n.ContextEventAt = e.Timestamp
+		}
+		if n.Boundary != nil {
+			n.BoundaryEventAt = e.Timestamp
+		}
+		if len(n.ObligationClaims) > 0 {
+			n.ObligationClaimsEventAt = e.Timestamp
+		}
 		s.Nodes[n.ID] = n
 		s.Order = append(s.Order, n.ID)
 		if e.NodeID >= s.NextID {
@@ -152,7 +168,7 @@ func (s *State) applyOne(e *Event) error {
 		if !ok {
 			return fmt.Errorf("node_revised targets missing node #%d", e.NodeID)
 		}
-		if e.ParentID == 0 && e.Intent == "" && e.RuleText == "" && e.Acceptance == nil && e.Envelope == nil && !e.AfterSet {
+		if e.ParentID == 0 && e.Intent == "" && e.RuleText == "" && e.Acceptance == nil && e.Envelope == nil && !e.AfterSet && !e.ContextSet && !e.BoundarySet && !e.ObligationClaimsSet {
 			return fmt.Errorf("node_revised #%d has no changes", e.NodeID)
 		}
 		if n.Terminal() {
@@ -201,6 +217,35 @@ func (s *State) applyOne(e *Event) error {
 			}
 			n.Envelope = env
 			n.EnvelopeEventAt = e.Timestamp
+		}
+		if e.ContextSet {
+			if n.Kind != KindGoal && n.Kind != KindTask {
+				return fmt.Errorf("node_revised cannot set context on %s #%d", n.Kind, e.NodeID)
+			}
+			context, err := normalizeNodeContext(e.Context)
+			if err != nil {
+				return fmt.Errorf("node_revised #%d invalid context: %w", e.NodeID, err)
+			}
+			n.Context = context
+			n.ContextEventAt = e.Timestamp
+		}
+		if e.BoundarySet {
+			if n.Kind != KindGoal && n.Kind != KindTask {
+				return fmt.Errorf("node_revised cannot set boundary on %s #%d", n.Kind, e.NodeID)
+			}
+			boundary, err := normalizeNodeBoundary(e.Boundary)
+			if err != nil {
+				return fmt.Errorf("node_revised #%d invalid boundary: %w", e.NodeID, err)
+			}
+			n.Boundary = boundary
+			n.BoundaryEventAt = e.Timestamp
+		}
+		if e.ObligationClaimsSet {
+			if n.Kind != KindTask {
+				return fmt.Errorf("node_revised cannot set obligation claims on %s #%d", n.Kind, e.NodeID)
+			}
+			n.ObligationClaims = normalizeObligationNames(e.ObligationClaims)
+			n.ObligationClaimsEventAt = e.Timestamp
 		}
 		if e.AfterSet {
 			if n.Kind != KindTask {
@@ -575,6 +620,9 @@ func (s *State) applyOne(e *Event) error {
 	default:
 		return fmt.Errorf("unknown event type %q", e.Type)
 	}
+	if err := s.validateBoundaryPartition(); err != nil {
+		return err
+	}
 	s.Revision.EventCount++
 	s.Revision.LastEventID = e.EventID
 	s.Revision.LastEventAt = e.Timestamp
@@ -690,6 +738,9 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 			if err := s.validateAcceptanceRunSetCompletion(n, e, runSet); err != nil {
 				return err
 			}
+			if err := validateNodeBoundaryCompletion(n, runSet); err != nil {
+				return err
+			}
 			return s.validateCompletionBoundaryEvidence(n, runSet, ids)
 		}
 		if len(ids) > 0 && !s.legacyVerifyCompletionScriptEvidence(n, e, ids) {
@@ -721,6 +772,9 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 		}
 	default:
 		return fmt.Errorf("task_completed #%d has unknown acceptance kind %q", n.ID, n.Acceptance.Kind)
+	}
+	if coverage := s.ObligationCoverage(n.ID); len(coverage.Missing) > 0 {
+		return fmt.Errorf("task_completed #%d has uncovered success obligation(s): %v", n.ID, coverage.Missing)
 	}
 	return nil
 }

@@ -23,6 +23,7 @@ Mental model:
   goal = node + aggregate progress; non-claimable; completion is derived
   task = node + acceptance + after prerequisites; claimable when ready
   rule = node + inherited text; non-claimable; not a policy engine
+  context/boundary/obligation = node-local declarations; global means high in tree
   attempt = claim-scoped correlation id for run/evidence/completion events
 
 Start from an empty repo:
@@ -38,8 +39,9 @@ Command surface:
   cst add  --intent "Root goal"
   cst add  --parent <id> --goal --intent "Child goal / workstream"
   cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]
+  cst add  ... [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--owned <path>] [--excluded <path>] [--obligation-claim <name>]
   cst add  --parent <id> --rule "Invariant or context visible to agents"
-  cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--after <id> ... | --clear-after] [--reason "..."]
+  cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--clear-context] [--owned <path>] [--excluded <path>] [--clear-boundary] [--obligation-claim <name> | --clear-obligation-claims] [--after <id> ... | --clear-after] [--reason "..."]
 
   cst brief [--within <id>] [--history]
   cst claims [--within <id>]
@@ -94,6 +96,17 @@ Read semantics:
   show actor, task, attempt, lease staleness, and latest execution identity.
   cst events is the event-source reader and always requires an explicit range:
   --for, --since, or --all --raw. Do not use --all in the normal Agent loop.
+
+Node briefing:
+  Use --invariant, --non-goal, and --success-obligation on any goal/task to
+  declare node-local context. Use --owned and --excluded to declare a node
+  boundary once; it is reused for briefing and accepted-diff validation. Use
+  --obligation-claim on static leaf tasks to claim named success obligations.
+  show, take, worker-status, and ui derive the same developer briefing by
+  walking root->node: context fold, local boundary, upstream/downstream edges,
+  local acceptance, obligation claims, success coverage, and partition warnings.
+  The reducer checks named set coverage and boundary path algebra; it cannot
+  prove prose understanding, so rationale remains review-only attestation.
 
 Acceptance and readiness:
   --verify <cmd>   shorthand for one verify check named "default".
@@ -463,12 +476,23 @@ func runAdd(args []string, asJSON bool) error {
 	review := fs.String("review", "", "review acceptance reviewer")
 	execCWD := fs.String("exec-cwd", "", "default checkout root for task execution")
 	privateExec := fs.Bool("private-exec-cwd", false, "mark exec-cwd as actor-private mutable surface")
+	invariant := fs.String("invariant", "", "node-local invariant context")
 	var after idListFlag
 	var checks checkListFlag
 	var scope stringListFlag
+	var nonGoals stringListFlag
+	var successObligations stringListFlag
+	var owned stringListFlag
+	var excluded stringListFlag
+	var obligationClaims stringListFlag
 	fs.Var(&after, "after", "readiness prerequisite node id (repeatable)")
 	fs.Var(&checks, "check", "named verify check in name=cmd form (repeatable)")
 	fs.Var(&scope, "scope", "owned path under exec checkout (repeatable)")
+	fs.Var(&nonGoals, "non-goal", "node-local non-goal context (repeatable)")
+	fs.Var(&successObligations, "success-obligation", "named success obligation declared by this node (repeatable)")
+	fs.Var(&owned, "owned", "node boundary owned repository path (repeatable)")
+	fs.Var(&excluded, "excluded", "node boundary excluded repository path (repeatable)")
+	fs.Var(&obligationClaims, "obligation-claim", "named success obligation claimed by this task acceptance (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -484,6 +508,12 @@ func runAdd(args []string, asJSON bool) error {
 	if envelope != nil && (*goal || *rule != "") {
 		return fmt.Errorf("execution envelope flags apply only to tasks")
 	}
+	invariantSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "invariant" {
+			invariantSet = true
+		}
+	})
 	return cst.DoAdd(os.Stdout, cst.AddArgs{
 		Parent:           *parent,
 		Intent:           *intent,
@@ -494,7 +524,28 @@ func runAdd(args []string, asJSON bool) error {
 		AcceptanceReview: *review,
 		After:            after.Values(),
 		Envelope:         envelope,
+		Context:          buildNodeContext(invariantSet, *invariant, nonGoals.Values(), successObligations.Values()),
+		Boundary:         buildNodeBoundary(owned.Values(), excluded.Values()),
+		ObligationClaims: obligationClaims.Values(),
 	}, asJSON)
+}
+
+func buildNodeContext(invariantSet bool, invariant string, nonGoals []string, successObligations []string) *cst.NodeContext {
+	if !invariantSet && len(nonGoals) == 0 && len(successObligations) == 0 {
+		return nil
+	}
+	return &cst.NodeContext{
+		Invariant:          invariant,
+		NonGoals:           nonGoals,
+		SuccessObligations: successObligations,
+	}
+}
+
+func buildNodeBoundary(owned []string, excluded []string) *cst.NodeBoundary {
+	if len(owned) == 0 && len(excluded) == 0 {
+		return nil
+	}
+	return &cst.NodeBoundary{Owned: owned, Excluded: excluded}
 }
 
 func buildAddEnvelope(execCWD string, private bool, ownedPaths []string) (*cst.ExecutionEnvelope, error) {
@@ -530,14 +581,28 @@ func runRevise(args []string, asJSON bool) error {
 	execCWD := fs.String("exec-cwd", "", "new default checkout root for task execution")
 	privateExec := fs.Bool("private-exec-cwd", false, "mark exec-cwd as actor-private mutable surface")
 	sharedExec := fs.Bool("shared-exec-cwd", false, "mark exec-cwd as shared mutable surface")
+	invariant := fs.String("invariant", "", "replace node-local invariant context")
 	var after idListFlag
 	var checks checkListFlag
 	var scope stringListFlag
+	var nonGoals stringListFlag
+	var successObligations stringListFlag
+	var owned stringListFlag
+	var excluded stringListFlag
+	var obligationClaims stringListFlag
 	fs.Var(&after, "after", "replace readiness prerequisites with node id (repeatable)")
 	fs.Var(&checks, "check", "replace verify acceptance with named check in name=cmd form (repeatable)")
 	fs.Var(&scope, "scope", "replace owned path under exec checkout (repeatable)")
+	fs.Var(&nonGoals, "non-goal", "replace node-local non-goal context (repeatable)")
+	fs.Var(&successObligations, "success-obligation", "replace named success obligations for this node (repeatable)")
+	fs.Var(&owned, "owned", "replace node boundary owned repository path (repeatable)")
+	fs.Var(&excluded, "excluded", "replace node boundary excluded repository path (repeatable)")
+	fs.Var(&obligationClaims, "obligation-claim", "replace named success obligation claims for this task acceptance (repeatable)")
 	clearAfter := fs.Bool("clear-after", false, "clear readiness prerequisites")
 	clearScope := fs.Bool("clear-scope", false, "clear owned path scope")
+	clearContext := fs.Bool("clear-context", false, "clear node-local context")
+	clearBoundary := fs.Bool("clear-boundary", false, "clear node boundary")
+	clearObligationClaims := fs.Bool("clear-obligation-claims", false, "clear task acceptance obligation claims")
 	reason := fs.String("reason", "", "revision reason")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -550,6 +615,12 @@ func runRevise(args []string, asJSON bool) error {
 	afterSet := *clearAfter
 	execCWDSet := false
 	scopeSet := *clearScope
+	invariantSet := false
+	nonGoalsSet := false
+	successObligationsSet := false
+	ownedSet := false
+	excludedSet := false
+	obligationClaimsSet := *clearObligationClaims
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "parent" {
 			parentSet = true
@@ -563,6 +634,24 @@ func runRevise(args []string, asJSON bool) error {
 		if f.Name == "scope" {
 			scopeSet = true
 		}
+		if f.Name == "invariant" {
+			invariantSet = true
+		}
+		if f.Name == "non-goal" {
+			nonGoalsSet = true
+		}
+		if f.Name == "success-obligation" {
+			successObligationsSet = true
+		}
+		if f.Name == "owned" {
+			ownedSet = true
+		}
+		if f.Name == "excluded" {
+			excludedSet = true
+		}
+		if f.Name == "obligation-claim" {
+			obligationClaimsSet = true
+		}
 	})
 	if *clearAfter && len(after) > 0 {
 		return fmt.Errorf("revise uses either --after or --clear-after, not both")
@@ -572,6 +661,15 @@ func runRevise(args []string, asJSON bool) error {
 	}
 	if *privateExec && *sharedExec {
 		return fmt.Errorf("revise uses either --private-exec-cwd or --shared-exec-cwd, not both")
+	}
+	if *clearContext && (invariantSet || nonGoalsSet || successObligationsSet) {
+		return fmt.Errorf("revise uses either --clear-context or context fields, not both")
+	}
+	if *clearBoundary && (ownedSet || excludedSet) {
+		return fmt.Errorf("revise uses either --clear-boundary or boundary fields, not both")
+	}
+	if *clearObligationClaims && len(obligationClaims) > 0 {
+		return fmt.Errorf("revise uses either --obligation-claim or --clear-obligation-claims, not both")
 	}
 	patch := cst.ExecutionEnvelopePatch{
 		ExecCWDSet:     execCWDSet,
@@ -595,9 +693,29 @@ func runRevise(args []string, asJSON bool) error {
 		AcceptanceReview: *review,
 		EnvelopeSet:      patch.ExecCWDSet || patch.ExecSurfaceSet || patch.OwnedPathsSet,
 		EnvelopePatch:    patch,
-		AfterSet:         afterSet,
-		After:            after.Values(),
-		Reason:           *reason,
+		ContextSet:       *clearContext || invariantSet || nonGoalsSet || successObligationsSet,
+		ContextPatch: cst.NodeContextPatch{
+			InvariantSet:          invariantSet,
+			Invariant:             *invariant,
+			NonGoalsSet:           nonGoalsSet,
+			NonGoals:              nonGoals.Values(),
+			SuccessObligationsSet: successObligationsSet,
+			SuccessObligations:    successObligations.Values(),
+			Clear:                 *clearContext,
+		},
+		BoundarySet: *clearBoundary || ownedSet || excludedSet,
+		BoundaryPatch: cst.NodeBoundaryPatch{
+			OwnedSet:    ownedSet,
+			Owned:       owned.Values(),
+			ExcludedSet: excludedSet,
+			Excluded:    excluded.Values(),
+			Clear:       *clearBoundary,
+		},
+		ObligationClaimsSet: obligationClaimsSet,
+		ObligationClaims:    obligationClaims.Values(),
+		AfterSet:            afterSet,
+		After:               after.Values(),
+		Reason:              *reason,
 	}, asJSON)
 }
 

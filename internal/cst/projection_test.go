@@ -1,7 +1,10 @@
 package cst
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,6 +148,184 @@ func TestShowIsSingleNodeBounded(t *testing.T) {
 	}
 	if len(v.Children) != 1 || v.Children[0].ID != 2 {
 		t.Fatalf("children preview wrong: %+v", v.Children)
+	}
+}
+
+func TestNodeDeclarationsProjectFromAddAndRevise(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{
+		Intent: "root",
+		Context: &NodeContext{
+			Invariant:          "global invariant",
+			SuccessObligations: []string{"coverage"},
+		},
+		Boundary: &NodeBoundary{Owned: []string{"."}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "leaf",
+		AcceptanceReview: "self",
+		Context:          &NodeContext{NonGoals: []string{"do not redesign runtime"}},
+		Boundary:         &NodeBoundary{Owned: []string{"internal/cst"}, Excluded: []string{"internal/cst/runtime"}},
+		ObligationClaims: []string{"coverage"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRevise(io.Discard, 2, ReviseArgs{
+		ContextSet: true,
+		ContextPatch: NodeContextPatch{
+			InvariantSet: true,
+			Invariant:    "leaf invariant",
+		},
+		BoundarySet: true,
+		BoundaryPatch: NodeBoundaryPatch{
+			ExcludedSet: true,
+			Excluded:    []string{"internal/cst/generated"},
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	state := replayState(t)
+	task := state.Nodes[2]
+	if task.Context == nil || task.Context.Invariant != "leaf invariant" || len(task.Context.NonGoals) != 1 {
+		t.Fatalf("context revise should merge with existing context: %+v", task.Context)
+	}
+	if task.Boundary == nil || len(task.Boundary.Owned) != 1 || task.Boundary.Excluded[0] != "internal/cst/generated" {
+		t.Fatalf("boundary revise should merge with existing boundary: %+v", task.Boundary)
+	}
+	if len(task.ObligationClaims) != 1 || task.ObligationClaims[0] != "coverage" {
+		t.Fatalf("obligation claims missing: %+v", task.ObligationClaims)
+	}
+
+	show, err := BuildShow(state, 2, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if show.Node.Context == nil || show.Node.Boundary == nil || len(show.Node.ObligationClaims) != 1 {
+		t.Fatalf("show projection missing declarations: %+v", show.Node)
+	}
+	brief, err := BuildBrief(state, DefaultConfig(), "agent", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(brief.Ready) != 1 || brief.Ready[0].Boundary == nil || len(brief.Ready[0].ObligationClaims) != 1 {
+		t.Fatalf("brief projection missing declarations: %+v", brief.Ready)
+	}
+}
+
+func TestNodeDeclarationClear(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "leaf",
+		AcceptanceReview: "self",
+		Context:          &NodeContext{Invariant: "x"},
+		Boundary:         &NodeBoundary{Owned: []string{"internal/cst"}},
+		ObligationClaims: []string{"coverage"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRevise(io.Discard, 2, ReviseArgs{
+		ContextSet:          true,
+		ContextPatch:        NodeContextPatch{Clear: true},
+		BoundarySet:         true,
+		BoundaryPatch:       NodeBoundaryPatch{Clear: true},
+		ObligationClaimsSet: true,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	task := replayState(t).Nodes[2]
+	if task.Context != nil || task.Boundary != nil || len(task.ObligationClaims) != 0 {
+		t.Fatalf("declarations should be cleared: %+v", task)
+	}
+}
+
+func TestDeveloperBriefingProjectsThroughShowTakeWorkerStatusAndUI(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{
+		Intent:  "root",
+		Context: &NodeContext{Invariant: "root invariant", SuccessObligations: []string{"api"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:  1,
+		Goal:    true,
+		Intent:  "phase",
+		Context: &NodeContext{NonGoals: []string{"do not touch runtime"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           2,
+		Intent:           "leaf",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"internal/cst"}},
+		ObligationClaims: []string{"api"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           2,
+		Intent:           "downstream",
+		AcceptanceReview: "self",
+		After:            []int64{3},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	state := replayState(t)
+	show, err := BuildShow(state, 3, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if show.Briefing == nil || show.Briefing.ContextFold == nil {
+		t.Fatalf("show briefing missing: %+v", show.Briefing)
+	}
+	if show.Briefing.ContextFold.Invariant != "root invariant" ||
+		len(show.Briefing.ContextFold.NonGoals) != 1 ||
+		len(show.Briefing.Downstream) != 1 ||
+		show.Briefing.Downstream[0] != 4 ||
+		show.Briefing.Boundary == nil ||
+		len(show.Briefing.ObligationClaims) != 1 {
+		t.Fatalf("show briefing incomplete: %+v", show.Briefing)
+	}
+
+	var takeOut bytes.Buffer
+	if err := DoTake(&takeOut, 3, true); err != nil {
+		t.Fatal(err)
+	}
+	var takeView TakeView
+	if err := json.Unmarshal(takeOut.Bytes(), &takeView); err != nil {
+		t.Fatalf("take output is not TakeView JSON: %v\n%s", err, takeOut.String())
+	}
+	if takeView.Briefing == nil || takeView.Briefing.ContextFold.Invariant != "root invariant" {
+		t.Fatalf("take briefing missing: %+v", takeView.Briefing)
+	}
+
+	var workerOut bytes.Buffer
+	if err := DoWorkerStatus(&workerOut, 3, true); err != nil {
+		t.Fatal(err)
+	}
+	var worker WorkerStatusView
+	if err := json.Unmarshal(workerOut.Bytes(), &worker); err != nil {
+		t.Fatalf("worker-status output is not WorkerStatusView JSON: %v\n%s", err, workerOut.String())
+	}
+	if worker.Briefing == nil || len(worker.Briefing.Downstream) != 1 {
+		t.Fatalf("worker briefing missing: %+v", worker.Briefing)
+	}
+
+	ui := renderHTML(uiViewFrom(replayState(t), 0, EventsPath(), "sample", 0, time.Now()))
+	for _, want := range []string{"Developer Briefing", "Success obligations: api", "boundary: owned=internal/cst"} {
+		if !strings.Contains(ui, want) {
+			t.Fatalf("ui missing %q\n%s", want, head(ui, 4000))
+		}
 	}
 }
 

@@ -45,6 +45,9 @@ type AddArgs struct {
 	AcceptanceReview string
 	After            []int64
 	Envelope         *ExecutionEnvelope
+	Context          *NodeContext
+	Boundary         *NodeBoundary
+	ObligationClaims []string
 }
 
 type TakeArgs struct {
@@ -78,6 +81,11 @@ type EvidenceArgs struct {
 	Data    string
 }
 
+type TakeView struct {
+	Claim    *Event             `json:"claim"`
+	Briefing *DeveloperBriefing `json:"briefing,omitempty"`
+}
+
 type EventsArgs struct {
 	NodeID       int64
 	AttemptID    string
@@ -87,24 +95,33 @@ type EventsArgs struct {
 }
 
 type ReviseArgs struct {
-	ParentSet        bool
-	Parent           int64
-	Intent           string
-	Rule             string
-	AcceptanceVerify string
-	VerifyChecks     []VerifyCheck
-	AcceptanceReview string
-	EnvelopeSet      bool
-	EnvelopePatch    ExecutionEnvelopePatch
-	AfterSet         bool
-	After            []int64
-	Reason           string
+	ParentSet           bool
+	Parent              int64
+	Intent              string
+	Rule                string
+	AcceptanceVerify    string
+	VerifyChecks        []VerifyCheck
+	AcceptanceReview    string
+	EnvelopeSet         bool
+	EnvelopePatch       ExecutionEnvelopePatch
+	ContextSet          bool
+	ContextPatch        NodeContextPatch
+	BoundarySet         bool
+	BoundaryPatch       NodeBoundaryPatch
+	ObligationClaimsSet bool
+	ObligationClaims    []string
+	AfterSet            bool
+	After               []int64
+	Reason              string
 }
 
 func DoAdd(out io.Writer, args AddArgs, asJSON bool) error {
 	var emitted *Event
 	err := WithStore(TxOpts{Mutating: true, RepairLease: false}, func(tx *Tx) error {
 		if args.Rule != "" {
+			if args.Context != nil || args.Boundary != nil || len(args.ObligationClaims) > 0 {
+				return herr(ExitUsage, "rule nodes use --rule; context, boundary, and obligation claims apply to goals/tasks")
+			}
 			ev, err := tx.CreateRule(args.Parent, args.Rule)
 			if err != nil {
 				return err
@@ -113,7 +130,10 @@ func DoAdd(out io.Writer, args AddArgs, asJSON bool) error {
 			return nil
 		}
 		if args.Parent == 0 && args.AcceptanceVerify == "" && len(args.VerifyChecks) == 0 && args.AcceptanceReview == "" && len(args.After) == 0 {
-			ev, err := tx.CreateGoal(0, args.Intent)
+			if len(args.ObligationClaims) > 0 {
+				return herr(ExitUsage, "obligation claims belong to task acceptance")
+			}
+			ev, err := tx.CreateGoal(0, args.Intent, args.Context, args.Boundary)
 			if err != nil {
 				return err
 			}
@@ -121,7 +141,10 @@ func DoAdd(out io.Writer, args AddArgs, asJSON bool) error {
 			return nil
 		}
 		if args.Goal {
-			ev, err := tx.CreateGoal(args.Parent, args.Intent)
+			if len(args.ObligationClaims) > 0 {
+				return herr(ExitUsage, "obligation claims belong to task acceptance")
+			}
+			ev, err := tx.CreateGoal(args.Parent, args.Intent, args.Context, args.Boundary)
 			if err != nil {
 				return err
 			}
@@ -132,7 +155,7 @@ func DoAdd(out io.Writer, args AddArgs, asJSON bool) error {
 		if err != nil {
 			return err
 		}
-		ev, err := tx.CreateTask(args.Parent, args.Intent, acceptance, args.After, args.Envelope)
+		ev, err := tx.CreateTask(args.Parent, args.Intent, acceptance, args.After, args.Envelope, args.Context, args.Boundary, args.ObligationClaims)
 		if err != nil {
 			return err
 		}
@@ -207,16 +230,22 @@ func DoRevise(out io.Writer, id int64, args ReviseArgs, asJSON bool) error {
 	var emitted *Event
 	err = WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
 		ev, err := tx.ReviseNode(id, ReviseSpec{
-			ParentSet:     args.ParentSet,
-			Parent:        args.Parent,
-			Intent:        args.Intent,
-			RuleText:      args.Rule,
-			Acceptance:    acceptance,
-			EnvelopeSet:   args.EnvelopeSet,
-			EnvelopePatch: args.EnvelopePatch,
-			AfterSet:      args.AfterSet,
-			After:         args.After,
-			Reason:        args.Reason,
+			ParentSet:           args.ParentSet,
+			Parent:              args.Parent,
+			Intent:              args.Intent,
+			RuleText:            args.Rule,
+			Acceptance:          acceptance,
+			EnvelopeSet:         args.EnvelopeSet,
+			EnvelopePatch:       args.EnvelopePatch,
+			ContextSet:          args.ContextSet,
+			ContextPatch:        args.ContextPatch,
+			BoundarySet:         args.BoundarySet,
+			BoundaryPatch:       args.BoundaryPatch,
+			ObligationClaimsSet: args.ObligationClaimsSet,
+			ObligationClaims:    args.ObligationClaims,
+			AfterSet:            args.AfterSet,
+			After:               args.After,
+			Reason:              args.Reason,
 		})
 		if err != nil {
 			return err
@@ -330,6 +359,7 @@ func DoTake(out io.Writer, id int64, asJSON bool) error {
 
 func DoTakeWithArgs(out io.Writer, id int64, args TakeArgs, asJSON bool) error {
 	var emitted *Event
+	var briefing *DeveloperBriefing
 	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
 		target := id
 		if target == 0 {
@@ -360,16 +390,18 @@ func DoTakeWithArgs(out io.Writer, id int64, args TakeArgs, asJSON bool) error {
 			return err
 		}
 		emitted = ev
+		briefing = BuildDeveloperBriefing(tx.Snapshot(), target)
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if asJSON {
-		WriteJSON(out, emitted)
+		WriteJSON(out, TakeView{Claim: emitted, Briefing: briefing})
 	} else {
 		fmt.Fprintf(out, "took #%d (actor=%s, lease until %s)\n",
 			emitted.NodeID, emitted.Actor, emitted.LeaseExpiresAt.Format(time.RFC3339))
+		RenderDeveloperBriefingText(out, briefing)
 	}
 	return nil
 }

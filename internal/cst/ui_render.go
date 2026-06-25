@@ -210,6 +210,8 @@ func renderPhaseDetails(sb *strings.Builder, phase phaseView) {
 	}
 	sb.WriteString(`</ul></div>`)
 
+	renderBriefingDetail(sb, "Developer Briefing", phase.Briefing)
+
 	sb.WriteString(`<div class="detail"><h3>Useful Reads</h3>`)
 	fmt.Fprintf(sb, `<code class="cmd">cst show %d</code>`, phase.Node.ID)
 	fmt.Fprintf(sb, `<code class="cmd">cst brief --within %d --human</code>`, phase.Node.ID)
@@ -260,6 +262,7 @@ func renderTaskDetail(sb *strings.Builder, row taskRowView) {
 	if row.Evidence != nil && row.Evidence.Summary != "" {
 		fmt.Fprintf(sb, `<p>latest evidence: %s · %s</p>`, html.EscapeString(row.Evidence.Kind), html.EscapeString(row.Evidence.Summary))
 	}
+	renderBriefingSummary(sb, row.Briefing)
 	if summary := closureSummary(row.Closure); summary != "" {
 		fmt.Fprintf(sb, `<p>closure: %s</p>`, html.EscapeString(summary))
 		for _, ev := range append(row.Closure.Boundary, row.Closure.Rationale...) {
@@ -271,6 +274,57 @@ func renderTaskDetail(sb *strings.Builder, row taskRowView) {
 		}
 	}
 	sb.WriteString(`</details>`)
+}
+
+func renderBriefingDetail(sb *strings.Builder, title string, briefing *DeveloperBriefing) {
+	if briefing == nil {
+		return
+	}
+	sb.WriteString(`<div class="detail"><h3>`)
+	sb.WriteString(html.EscapeString(title))
+	sb.WriteString(`</h3><ul>`)
+	if briefing.ContextFold != nil {
+		if briefing.ContextFold.Invariant != "" {
+			fmt.Fprintf(sb, `<li>Invariant: %s</li>`, html.EscapeString(strings.ReplaceAll(briefing.ContextFold.Invariant, "\n", " | ")))
+		}
+		if len(briefing.ContextFold.NonGoals) > 0 {
+			fmt.Fprintf(sb, `<li>Non-goals: %s</li>`, html.EscapeString(strings.Join(briefing.ContextFold.NonGoals, "; ")))
+		}
+		if len(briefing.ContextFold.SuccessObligations) > 0 {
+			fmt.Fprintf(sb, `<li>Success obligations: %s</li>`, html.EscapeString(strings.Join(briefing.ContextFold.SuccessObligations, ",")))
+		}
+	}
+	if briefing.Boundary != nil {
+		fmt.Fprintf(sb, `<li>Boundary: %s</li>`, html.EscapeString(boundarySummary(briefing.Boundary)))
+	}
+	if len(briefing.Upstream) > 0 || len(briefing.Downstream) > 0 {
+		fmt.Fprintf(sb, `<li>Edges: upstream=%s downstream=%s</li>`, html.EscapeString(joinIDsOrNone(briefing.Upstream)), html.EscapeString(joinIDsOrNone(briefing.Downstream)))
+	}
+	if briefing.ObligationCoverage != nil {
+		fmt.Fprintf(sb, `<li>Coverage: required=%s claimed=%s missing=%s</li>`,
+			html.EscapeString(joinStringsOrNone(briefing.ObligationCoverage.Required)),
+			html.EscapeString(joinStringsOrNone(briefing.ObligationCoverage.Claimed)),
+			html.EscapeString(joinStringsOrNone(briefing.ObligationCoverage.Missing)))
+	}
+	if len(briefing.Warnings) > 0 {
+		fmt.Fprintf(sb, `<li>Warnings: %s</li>`, html.EscapeString(strings.Join(briefing.Warnings, "; ")))
+	}
+	sb.WriteString(`</ul></div>`)
+}
+
+func renderBriefingSummary(sb *strings.Builder, briefing *DeveloperBriefing) {
+	if briefing == nil {
+		return
+	}
+	if briefing.Boundary != nil {
+		fmt.Fprintf(sb, `<p>boundary: %s</p>`, html.EscapeString(boundarySummary(briefing.Boundary)))
+	}
+	if len(briefing.ObligationClaims) > 0 {
+		fmt.Fprintf(sb, `<p>obligation claims: %s</p>`, html.EscapeString(strings.Join(briefing.ObligationClaims, ",")))
+	}
+	if briefing.ObligationCoverage != nil && len(briefing.ObligationCoverage.Missing) > 0 {
+		fmt.Fprintf(sb, `<p>missing obligations: %s</p>`, html.EscapeString(strings.Join(briefing.ObligationCoverage.Missing, ",")))
+	}
 }
 
 func renderSide(sb *strings.Builder, v uiView) {

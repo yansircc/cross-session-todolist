@@ -10,33 +10,34 @@ import (
 
 // BriefView is the bounded Agent-facing projection of state.
 type BriefView struct {
-	Revision             Revision         `json:"revision"`
-	Mode                 string           `json:"mode,omitempty"`
-	Root                 *NodeBrief       `json:"root,omitempty"`
-	Scope                *NodeBrief       `json:"scope,omitempty"`
-	Summary              *Progress        `json:"summary,omitempty"`
-	Subtrees             []*SubtreeBrief  `json:"subtrees,omitempty"`
-	SubtreesMeta         *CollectionMeta  `json:"subtrees_meta,omitempty"`
-	CompletedSubtrees    *CollectionMeta  `json:"completed_subtrees_meta,omitempty"`
-	InheritedRules       []*RuleBrief     `json:"inherited_rules,omitempty"`
-	Ready                []*TaskBrief     `json:"ready,omitempty"`
-	ReadyMeta            *CollectionMeta  `json:"ready_meta,omitempty"`
-	ReviewReady          []*TaskBrief     `json:"review_ready,omitempty"`
-	ReviewReadyMeta      *CollectionMeta  `json:"review_ready_meta,omitempty"`
-	Waiting              []*TaskBrief     `json:"waiting_on,omitempty"`
-	WaitingMeta          *CollectionMeta  `json:"waiting_on_meta,omitempty"`
-	DependencyFailed     []*TaskBrief     `json:"dependency_failed,omitempty"`
-	DependencyFailedMeta *CollectionMeta  `json:"dependency_failed_meta,omitempty"`
-	Held                 []*HeldBrief     `json:"held,omitempty"`
-	HeldMeta             *CollectionMeta  `json:"held_meta,omitempty"`
-	Claims               []*ClaimBrief    `json:"claims,omitempty"`
-	ClaimsMeta           *CollectionMeta  `json:"claims_meta,omitempty"`
-	RecentFailures       []ScriptRunBrief `json:"recent_failures,omitempty"`
-	RecentRuns           []ScriptRunBrief `json:"recent_runs,omitempty"`
-	RecentDone           []int64          `json:"recent_done,omitempty"`
-	RecentCanceled       []int64          `json:"recent_canceled,omitempty"`
-	Actor                string           `json:"actor"`
-	GeneratedAt          time.Time        `json:"generated_at"`
+	Revision             Revision            `json:"revision"`
+	Mode                 string              `json:"mode,omitempty"`
+	Root                 *NodeBrief          `json:"root,omitempty"`
+	Scope                *NodeBrief          `json:"scope,omitempty"`
+	Summary              *Progress           `json:"summary,omitempty"`
+	ObligationCoverage   *ObligationCoverage `json:"obligation_coverage,omitempty"`
+	Subtrees             []*SubtreeBrief     `json:"subtrees,omitempty"`
+	SubtreesMeta         *CollectionMeta     `json:"subtrees_meta,omitempty"`
+	CompletedSubtrees    *CollectionMeta     `json:"completed_subtrees_meta,omitempty"`
+	InheritedRules       []*RuleBrief        `json:"inherited_rules,omitempty"`
+	Ready                []*TaskBrief        `json:"ready,omitempty"`
+	ReadyMeta            *CollectionMeta     `json:"ready_meta,omitempty"`
+	ReviewReady          []*TaskBrief        `json:"review_ready,omitempty"`
+	ReviewReadyMeta      *CollectionMeta     `json:"review_ready_meta,omitempty"`
+	Waiting              []*TaskBrief        `json:"waiting_on,omitempty"`
+	WaitingMeta          *CollectionMeta     `json:"waiting_on_meta,omitempty"`
+	DependencyFailed     []*TaskBrief        `json:"dependency_failed,omitempty"`
+	DependencyFailedMeta *CollectionMeta     `json:"dependency_failed_meta,omitempty"`
+	Held                 []*HeldBrief        `json:"held,omitempty"`
+	HeldMeta             *CollectionMeta     `json:"held_meta,omitempty"`
+	Claims               []*ClaimBrief       `json:"claims,omitempty"`
+	ClaimsMeta           *CollectionMeta     `json:"claims_meta,omitempty"`
+	RecentFailures       []ScriptRunBrief    `json:"recent_failures,omitempty"`
+	RecentRuns           []ScriptRunBrief    `json:"recent_runs,omitempty"`
+	RecentDone           []int64             `json:"recent_done,omitempty"`
+	RecentCanceled       []int64             `json:"recent_canceled,omitempty"`
+	Actor                string              `json:"actor"`
+	GeneratedAt          time.Time           `json:"generated_at"`
 }
 
 type CollectionMeta struct {
@@ -58,15 +59,19 @@ type RuleBrief struct {
 }
 
 type TaskBrief struct {
-	ID             int64              `json:"id"`
-	ParentID       int64              `json:"parent_id"`
-	Intent         string             `json:"intent"`
-	AcceptanceKind string             `json:"acceptance_kind,omitempty"`
-	After          []int64            `json:"after,omitempty"`
-	WaitingOn      []int64            `json:"waiting_on,omitempty"`
-	BlockedBy      []int64            `json:"blocked_by,omitempty"`
-	Inherited      []int64            `json:"inherited_rule_ids,omitempty"`
-	Closure        *ClosureProjection `json:"closure,omitempty"`
+	ID                 int64               `json:"id"`
+	ParentID           int64               `json:"parent_id"`
+	Intent             string              `json:"intent"`
+	AcceptanceKind     string              `json:"acceptance_kind,omitempty"`
+	Context            *NodeContext        `json:"context,omitempty"`
+	Boundary           *NodeBoundary       `json:"boundary,omitempty"`
+	ObligationClaims   []string            `json:"obligation_claims,omitempty"`
+	After              []int64             `json:"after,omitempty"`
+	WaitingOn          []int64             `json:"waiting_on,omitempty"`
+	BlockedBy          []int64             `json:"blocked_by,omitempty"`
+	Inherited          []int64             `json:"inherited_rule_ids,omitempty"`
+	ObligationCoverage *ObligationCoverage `json:"obligation_coverage,omitempty"`
+	Closure            *ClosureProjection  `json:"closure,omitempty"`
 }
 
 type HeldBrief struct {
@@ -133,6 +138,10 @@ func BuildBriefWithOptions(s *State, cfg Config, actor string, opts BriefOptions
 		p := s.SubtreeProgress(scope.ID)
 		bv.Summary = &p
 		bv.Scope = &NodeBrief{ID: scope.ID, Intent: scope.Intent, Status: string(s.NodeStatus(scope))}
+		coverage := s.ObligationCoverage(scope.ID)
+		if len(coverage.Required) > 0 || len(coverage.Claimed) > 0 {
+			bv.ObligationCoverage = &coverage
+		}
 		for _, r := range s.InheritedRules(scope.ID) {
 			bv.InheritedRules = append(bv.InheritedRules, &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText})
 			if cfg.BriefMaxRules > 0 && len(bv.InheritedRules) >= cfg.BriefMaxRules {
@@ -241,9 +250,16 @@ func buildTaskBrief(s *State, t *Node) *TaskBrief {
 	if t.Acceptance != nil {
 		tb.AcceptanceKind = t.Acceptance.Kind
 	}
+	tb.Context = cloneNodeContext(t.Context)
+	tb.Boundary = cloneNodeBoundary(t.Boundary)
+	tb.ObligationClaims = append([]string(nil), t.ObligationClaims...)
 	tb.After = append([]int64(nil), t.After...)
 	tb.WaitingOn = s.WaitingOnIDs(t)
 	tb.BlockedBy = s.DependencyFailedIDs(t)
+	coverage := s.ObligationCoverage(t.ID)
+	if len(coverage.Required) > 0 || len(coverage.Claimed) > 0 {
+		tb.ObligationCoverage = &coverage
+	}
 	tb.Closure = closureProjection(t)
 	for _, r := range s.InheritedRules(t.ID) {
 		tb.Inherited = append(tb.Inherited, r.ID)
@@ -267,6 +283,13 @@ func RenderBriefText(w io.Writer, bv BriefView) {
 			bv.Summary.TotalTasks, bv.Summary.OpenTasks, bv.Summary.ReadyTasks,
 			bv.Summary.ClaimedTasks, bv.Summary.HeldTasks, bv.Summary.CompletedTasks,
 			bv.Summary.CanceledTasks, bv.Summary.PercentDone)
+	}
+	if bv.ObligationCoverage != nil {
+		fmt.Fprintf(w, "success obligations: required=%s claimed=%s missing=%s unmatched=%s\n",
+			joinStringsOrNone(bv.ObligationCoverage.Required),
+			joinStringsOrNone(bv.ObligationCoverage.Claimed),
+			joinStringsOrNone(bv.ObligationCoverage.Missing),
+			joinStringsOrNone(bv.ObligationCoverage.UnmatchedClaims))
 	}
 	if len(bv.Subtrees) > 0 {
 		label := "active subtrees"
@@ -398,6 +421,15 @@ func renderTaskBriefLine(w io.Writer, t *TaskBrief) {
 	if summary := closureSummary(t.Closure); summary != "" {
 		parts = append(parts, "closure="+summary)
 	}
+	if t.Boundary != nil {
+		parts = append(parts, "boundary="+boundarySummary(t.Boundary))
+	}
+	if len(t.ObligationClaims) > 0 {
+		parts = append(parts, "claims="+strings.Join(t.ObligationClaims, ","))
+	}
+	if t.ObligationCoverage != nil && len(t.ObligationCoverage.Missing) > 0 {
+		parts = append(parts, "missing_obligations="+strings.Join(t.ObligationCoverage.Missing, ","))
+	}
 	label := ""
 	if len(parts) > 0 {
 		label = " (" + strings.Join(parts, " ") + ")"
@@ -405,22 +437,55 @@ func renderTaskBriefLine(w io.Writer, t *TaskBrief) {
 	fmt.Fprintf(w, "  #%d under #%d%s %s\n", t.ID, t.ParentID, label, t.Intent)
 }
 
+func boundarySummary(boundary *NodeBoundary) string {
+	if boundary == nil {
+		return ""
+	}
+	parts := []string{}
+	if len(boundary.Owned) > 0 {
+		parts = append(parts, "owned="+strings.Join(boundary.Owned, ","))
+	}
+	if len(boundary.Excluded) > 0 {
+		parts = append(parts, "excluded="+strings.Join(boundary.Excluded, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func eventDeclarationSuffix(e *Event) string {
+	parts := []string{}
+	if e.Context != nil {
+		parts = append(parts, "context")
+	}
+	if e.Boundary != nil {
+		parts = append(parts, "boundary")
+	}
+	if len(e.ObligationClaims) > 0 {
+		parts = append(parts, "obligation_claims="+strings.Join(e.ObligationClaims, ","))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
 // ShowView is the bounded record for a single node. Full event history is read
 // through `cst events --for <id>`.
 type ShowView struct {
-	Node               *NodeDetail        `json:"node"`
-	Status             string             `json:"status"`
-	Progress           *Progress          `json:"progress,omitempty"`
-	Lineage            []int64            `json:"lineage"`
-	InheritedRules     []*RuleBrief       `json:"inherited_rules,omitempty"`
-	Children           []*ChildBrief      `json:"children,omitempty"`
-	ChildrenMeta       *CollectionMeta    `json:"children_meta,omitempty"`
-	RecentRuns         []ScriptRunRecord  `json:"recent_runs,omitempty"`
-	RecentRunsMeta     *CollectionMeta    `json:"recent_runs_meta,omitempty"`
-	RecentEvidence     []EvidenceRecord   `json:"recent_evidence,omitempty"`
-	RecentEvidenceMeta *CollectionMeta    `json:"recent_evidence_meta,omitempty"`
-	LatestContextDrift *EvidenceRecord    `json:"latest_context_drift,omitempty"`
-	Closure            *ClosureProjection `json:"closure,omitempty"`
+	Node               *NodeDetail         `json:"node"`
+	Status             string              `json:"status"`
+	Progress           *Progress           `json:"progress,omitempty"`
+	Lineage            []int64             `json:"lineage"`
+	InheritedRules     []*RuleBrief        `json:"inherited_rules,omitempty"`
+	Children           []*ChildBrief       `json:"children,omitempty"`
+	ChildrenMeta       *CollectionMeta     `json:"children_meta,omitempty"`
+	RecentRuns         []ScriptRunRecord   `json:"recent_runs,omitempty"`
+	RecentRunsMeta     *CollectionMeta     `json:"recent_runs_meta,omitempty"`
+	RecentEvidence     []EvidenceRecord    `json:"recent_evidence,omitempty"`
+	RecentEvidenceMeta *CollectionMeta     `json:"recent_evidence_meta,omitempty"`
+	LatestContextDrift *EvidenceRecord     `json:"latest_context_drift,omitempty"`
+	Closure            *ClosureProjection  `json:"closure,omitempty"`
+	ObligationCoverage *ObligationCoverage `json:"obligation_coverage,omitempty"`
+	Briefing           *DeveloperBriefing  `json:"briefing,omitempty"`
 }
 
 type NodeDetail struct {
@@ -431,6 +496,9 @@ type NodeDetail struct {
 	RuleText             string             `json:"rule_text,omitempty"`
 	Acceptance           *Acceptance        `json:"acceptance,omitempty"`
 	Envelope             *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	Context              *NodeContext       `json:"context,omitempty"`
+	Boundary             *NodeBoundary      `json:"boundary,omitempty"`
+	ObligationClaims     []string           `json:"obligation_claims,omitempty"`
 	After                []int64            `json:"after,omitempty"`
 	CreatedAt            time.Time          `json:"created_at"`
 	CreatedBy            string             `json:"created_by"`
@@ -461,6 +529,7 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 		Node:               buildNodeDetail(n),
 		Status:             string(s.NodeStatus(n)),
 		Lineage:            s.ancestorChain(id),
+		Briefing:           BuildDeveloperBriefing(s, id),
 		ChildrenMeta:       collectionMeta(len(n.Children), 0),
 		RecentRunsMeta:     collectionMeta(len(n.Runs), 0),
 		RecentEvidenceMeta: collectionMeta(len(n.Evidences), 0),
@@ -468,6 +537,10 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 	if n.Kind == KindGoal || n.Kind == KindTask {
 		p := s.SubtreeProgress(id)
 		v.Progress = &p
+		coverage := s.ObligationCoverage(id)
+		if len(coverage.Required) > 0 || len(coverage.Claimed) > 0 {
+			v.ObligationCoverage = &coverage
+		}
 	}
 	children := n.Children
 	if cfg.BriefMaxTasks > 0 && len(children) > cfg.BriefMaxTasks {
@@ -498,17 +571,20 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 
 func buildNodeDetail(n *Node) *NodeDetail {
 	d := &NodeDetail{
-		ID:         n.ID,
-		ParentID:   n.ParentID,
-		Kind:       n.Kind,
-		Intent:     n.Intent,
-		RuleText:   n.RuleText,
-		Acceptance: n.Acceptance,
-		Envelope:   cloneExecutionEnvelope(n.Envelope),
-		After:      append([]int64(nil), n.After...),
-		CreatedAt:  n.CreatedAt,
-		CreatedBy:  n.CreatedBy,
-		LastEvent:  n.LastEvent,
+		ID:               n.ID,
+		ParentID:         n.ParentID,
+		Kind:             n.Kind,
+		Intent:           n.Intent,
+		RuleText:         n.RuleText,
+		Acceptance:       n.Acceptance,
+		Envelope:         cloneExecutionEnvelope(n.Envelope),
+		Context:          cloneNodeContext(n.Context),
+		Boundary:         cloneNodeBoundary(n.Boundary),
+		ObligationClaims: append([]string(nil), n.ObligationClaims...),
+		After:            append([]int64(nil), n.After...),
+		CreatedAt:        n.CreatedAt,
+		CreatedBy:        n.CreatedBy,
+		LastEvent:        n.LastEvent,
 	}
 	if !n.Terminal() {
 		d.Claim = n.Claim
@@ -586,6 +662,24 @@ func RenderShowText(w io.Writer, v ShowView) {
 		fmt.Fprintf(w, "execution envelope: exec_cwd=%s surface=%s scope=%s\n",
 			n.Envelope.ExecCWD, firstNonEmpty(n.Envelope.ExecSurface, ExecSurfaceShared), strings.Join(n.Envelope.OwnedPaths, ","))
 	}
+	if n.Context != nil {
+		fmt.Fprintln(w, "context:")
+		if n.Context.Invariant != "" {
+			fmt.Fprintf(w, "  invariant: %s\n", n.Context.Invariant)
+		}
+		if len(n.Context.NonGoals) > 0 {
+			fmt.Fprintf(w, "  non_goals: %s\n", strings.Join(n.Context.NonGoals, "; "))
+		}
+		if len(n.Context.SuccessObligations) > 0 {
+			fmt.Fprintf(w, "  success_obligations: %s\n", strings.Join(n.Context.SuccessObligations, ","))
+		}
+	}
+	if n.Boundary != nil {
+		fmt.Fprintf(w, "boundary: %s\n", boundarySummary(n.Boundary))
+	}
+	if len(n.ObligationClaims) > 0 {
+		fmt.Fprintf(w, "obligation claims: %s\n", strings.Join(n.ObligationClaims, ","))
+	}
 	if n.Claim != nil {
 		attempt := ""
 		if n.Claim.AttemptID != "" {
@@ -609,6 +703,14 @@ func RenderShowText(w io.Writer, v ShowView) {
 			v.Progress.ClaimedTasks, v.Progress.HeldTasks, v.Progress.CompletedTasks,
 			v.Progress.CanceledTasks, v.Progress.PercentDone)
 	}
+	if v.ObligationCoverage != nil {
+		fmt.Fprintf(w, "success obligations: required=%s claimed=%s missing=%s unmatched=%s\n",
+			joinStringsOrNone(v.ObligationCoverage.Required),
+			joinStringsOrNone(v.ObligationCoverage.Claimed),
+			joinStringsOrNone(v.ObligationCoverage.Missing),
+			joinStringsOrNone(v.ObligationCoverage.UnmatchedClaims))
+	}
+	RenderDeveloperBriefingText(w, v.Briefing)
 	if len(v.Lineage) > 1 {
 		fmt.Fprintf(w, "lineage: %s\n", joinIDs(v.Lineage))
 	}
@@ -676,8 +778,9 @@ func RenderEventsText(w io.Writer, events []*Event) {
 				if len(e.After) > 0 {
 					after = " after=" + joinIDsBare(e.After)
 				}
-				fmt.Fprintf(w, "%s  #%d  task under #%d%s%s  %q\n",
-					e.Timestamp.Format(time.RFC3339), e.NodeID, e.ParentID, acceptance, after, e.Intent)
+				declaration := eventDeclarationSuffix(e)
+				fmt.Fprintf(w, "%s  #%d  task under #%d%s%s%s  %q\n",
+					e.Timestamp.Format(time.RFC3339), e.NodeID, e.ParentID, acceptance, after, declaration, e.Intent)
 			}
 		case EvNodeRevised:
 			parts := []string{}
@@ -695,6 +798,15 @@ func RenderEventsText(w io.Writer, events []*Event) {
 			}
 			if e.AfterSet {
 				parts = append(parts, fmt.Sprintf("after=%s", joinIDsBare(e.After)))
+			}
+			if e.ContextSet {
+				parts = append(parts, "context=set")
+			}
+			if e.BoundarySet {
+				parts = append(parts, "boundary=set")
+			}
+			if e.ObligationClaimsSet {
+				parts = append(parts, fmt.Sprintf("obligation_claims=%s", strings.Join(e.ObligationClaims, ",")))
 			}
 			if e.Reason != "" {
 				parts = append(parts, fmt.Sprintf("reason=%q", e.Reason))
@@ -761,4 +873,11 @@ func joinIDsBare(ids []int64) string {
 		parts[i] = fmt.Sprintf("%d", id)
 	}
 	return strings.Join(parts, ",")
+}
+
+func joinStringsOrNone(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ",")
 }

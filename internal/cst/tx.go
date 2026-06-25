@@ -106,9 +106,13 @@ func (tx *Tx) StoreID() string        { return tx.state.StoreID() }
 
 // CreateGoal appends an aggregate node. The root goal is the only parent==0
 // node in a store; child goals must live under another goal.
-func (tx *Tx) CreateGoal(parent int64, intent string) (*Event, error) {
+func (tx *Tx) CreateGoal(parent int64, intent string, context *NodeContext, boundary *NodeBoundary) (*Event, error) {
 	if intent == "" {
 		return nil, herr(ExitUsage, "goal requires --intent")
+	}
+	context, boundary, _, err := normalizeNodeDeclarations(tx.state.NextID, KindGoal, context, boundary, nil)
+	if err != nil {
+		return nil, herr(ExitUsage, "%s", err.Error())
 	}
 	if parent == 0 {
 		if existing := tx.state.AnyRoot(); existing != nil {
@@ -137,6 +141,8 @@ func (tx *Tx) CreateGoal(parent int64, intent string) (*Event, error) {
 		ParentID:  parent,
 		Kind:      KindGoal,
 		Intent:    intent,
+		Context:   context,
+		Boundary:  boundary,
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
 		return nil, err
@@ -147,7 +153,7 @@ func (tx *Tx) CreateGoal(parent int64, intent string) (*Event, error) {
 // CreateTask appends a node_created event for an executable task. Tasks must
 // live under a goal or another task and must declare acceptance. Readiness
 // prerequisites are independent `after` edges.
-func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, after []int64, envelope *ExecutionEnvelope) (*Event, error) {
+func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, after []int64, envelope *ExecutionEnvelope, context *NodeContext, boundary *NodeBoundary, obligationClaims []string) (*Event, error) {
 	if intent == "" {
 		return nil, herr(ExitUsage, "task requires --intent")
 	}
@@ -174,18 +180,25 @@ func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, af
 	if err != nil {
 		return nil, herr(ExitUsage, "%s", err.Error())
 	}
+	context, boundary, obligationClaims, err = normalizeNodeDeclarations(tx.state.NextID, KindTask, context, boundary, obligationClaims)
+	if err != nil {
+		return nil, herr(ExitUsage, "%s", err.Error())
+	}
 	ev := &Event{
-		EventID:    NewEventID(),
-		Timestamp:  tx.now,
-		Actor:      tx.actor,
-		Type:       EvNodeCreated,
-		NodeID:     tx.state.NextID,
-		ParentID:   parent,
-		Kind:       KindTask,
-		Intent:     intent,
-		Acceptance: acceptance,
-		Envelope:   env,
-		After:      append([]int64(nil), after...),
+		EventID:          NewEventID(),
+		Timestamp:        tx.now,
+		Actor:            tx.actor,
+		Type:             EvNodeCreated,
+		NodeID:           tx.state.NextID,
+		ParentID:         parent,
+		Kind:             KindTask,
+		Intent:           intent,
+		Acceptance:       acceptance,
+		Envelope:         env,
+		Context:          context,
+		Boundary:         boundary,
+		ObligationClaims: obligationClaims,
+		After:            append([]int64(nil), after...),
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
 		return nil, err
@@ -230,16 +243,22 @@ func (tx *Tx) CreateRule(parent int64, text string) (*Event, error) {
 }
 
 type ReviseSpec struct {
-	ParentSet     bool
-	Parent        int64
-	Intent        string
-	RuleText      string
-	Acceptance    *Acceptance
-	EnvelopeSet   bool
-	EnvelopePatch ExecutionEnvelopePatch
-	AfterSet      bool
-	After         []int64
-	Reason        string
+	ParentSet           bool
+	Parent              int64
+	Intent              string
+	RuleText            string
+	Acceptance          *Acceptance
+	EnvelopeSet         bool
+	EnvelopePatch       ExecutionEnvelopePatch
+	ContextSet          bool
+	ContextPatch        NodeContextPatch
+	BoundarySet         bool
+	BoundaryPatch       NodeBoundaryPatch
+	ObligationClaimsSet bool
+	ObligationClaims    []string
+	AfterSet            bool
+	After               []int64
+	Reason              string
 }
 
 func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
@@ -281,8 +300,8 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 			}
 		}
 	}
-	if !spec.ParentSet && spec.Intent == "" && spec.RuleText == "" && spec.Acceptance == nil && !spec.EnvelopeSet && !spec.AfterSet {
-		return nil, herr(ExitUsage, "revise requires at least one of --parent, --intent, --rule, --verify, --review, --exec-cwd, --scope, --after")
+	if !spec.ParentSet && spec.Intent == "" && spec.RuleText == "" && spec.Acceptance == nil && !spec.EnvelopeSet && !spec.ContextSet && !spec.BoundarySet && !spec.ObligationClaimsSet && !spec.AfterSet {
+		return nil, herr(ExitUsage, "revise requires at least one changed field")
 	}
 	if spec.Intent != "" && n.Kind == KindRule {
 		return nil, herr(ExitInvariantBroken, "rule #%d uses --rule, not --intent", id)
@@ -299,6 +318,12 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 	if spec.EnvelopeSet && n.Kind != KindTask {
 		return nil, herr(ExitInvariantBroken, "%s #%d cannot have execution envelope", n.Kind, id)
 	}
+	if (spec.ContextSet || spec.BoundarySet) && n.Kind != KindGoal && n.Kind != KindTask {
+		return nil, herr(ExitInvariantBroken, "%s #%d cannot have context or boundary", n.Kind, id)
+	}
+	if spec.ObligationClaimsSet && n.Kind != KindTask {
+		return nil, herr(ExitInvariantBroken, "%s #%d cannot have obligation claims", n.Kind, id)
+	}
 	if spec.AfterSet {
 		if err := tx.validateAfter(id, spec.After); err != nil {
 			return nil, err
@@ -312,22 +337,48 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 			return nil, herr(ExitUsage, "%s", err.Error())
 		}
 	}
+	var context *NodeContext
+	if spec.ContextSet {
+		var err error
+		context, err = mergeNodeContextPatch(n.Context, spec.ContextPatch)
+		if err != nil {
+			return nil, herr(ExitUsage, "%s", err.Error())
+		}
+	}
+	var boundary *NodeBoundary
+	if spec.BoundarySet {
+		var err error
+		boundary, err = mergeNodeBoundaryPatch(n.Boundary, spec.BoundaryPatch)
+		if err != nil {
+			return nil, herr(ExitUsage, "%s", err.Error())
+		}
+	}
+	var obligationClaims []string
+	if spec.ObligationClaimsSet {
+		obligationClaims = normalizeObligationNames(spec.ObligationClaims)
+	}
 	parentID := int64(0)
 	if spec.ParentSet {
 		parentID = spec.Parent
 	}
 	ev := &Event{
-		EventID:    NewEventID(),
-		Timestamp:  tx.now,
-		Actor:      tx.actor,
-		Type:       EvNodeRevised,
-		NodeID:     id,
-		ParentID:   parentID,
-		Intent:     spec.Intent,
-		RuleText:   spec.RuleText,
-		Acceptance: spec.Acceptance,
-		Envelope:   env,
-		Reason:     spec.Reason,
+		EventID:             NewEventID(),
+		Timestamp:           tx.now,
+		Actor:               tx.actor,
+		Type:                EvNodeRevised,
+		NodeID:              id,
+		ParentID:            parentID,
+		Intent:              spec.Intent,
+		RuleText:            spec.RuleText,
+		Acceptance:          spec.Acceptance,
+		Envelope:            env,
+		Context:             context,
+		Boundary:            boundary,
+		ObligationClaims:    obligationClaims,
+		ContextSet:          spec.ContextSet,
+		BoundarySet:         spec.BoundarySet,
+		ObligationClaimsSet: spec.ObligationClaimsSet,
+		Reason:              spec.Reason,
 	}
 	if spec.AfterSet {
 		ev.After = append([]int64(nil), spec.After...)
