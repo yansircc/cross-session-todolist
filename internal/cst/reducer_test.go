@@ -11,13 +11,13 @@ func TestParentCannotCompleteWithOpenChild(t *testing.T) {
 	withTempStore(t)
 	state := NewState()
 	applyEvents(t, state,
-		&Event{Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
-		&Event{Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "child", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
+		&Event{EventID: "root", Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
+		&Event{EventID: "child", Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "child", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
 	)
 	if state.NodeStatus(state.Root()) != StatusOpen {
 		t.Fatal("root goal should stay open while child is open")
 	}
-	applyEvents(t, state, &Event{Type: EvNodeCanceled, NodeID: 2, Actor: "a", Reason: "not needed"})
+	applyEvents(t, state, &Event{EventID: "cancel-child", Type: EvNodeCanceled, NodeID: 2, Actor: "a", Reason: "not needed"})
 	if state.NodeStatus(state.Root()) != StatusCompleted {
 		t.Fatal("root goal should derive completed after child terminal")
 	}
@@ -28,9 +28,9 @@ func TestLazyAbandonExpired(t *testing.T) {
 	state := NewState()
 	pastExp := time.Now().Add(-time.Hour)
 	applyEvents(t, state,
-		&Event{Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
-		&Event{Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
-		&Event{Type: EvClaimTaken, NodeID: 2, LeaseID: "old", LeaseExpiresAt: &pastExp, Actor: "a"},
+		&Event{EventID: "root", Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
+		&Event{EventID: "task", Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
+		&Event{EventID: "claim", Type: EvClaimTaken, NodeID: 2, LeaseID: "old", LeaseExpiresAt: &pastExp, Actor: "a"},
 	)
 	abandoned := state.LazyAbandonExpired(time.Now())
 	if len(abandoned) != 1 {
@@ -44,10 +44,10 @@ func TestLazyAbandonExpired(t *testing.T) {
 func TestTerminalEventsClearActiveHold(t *testing.T) {
 	state := NewState()
 	applyEvents(t, state,
-		&Event{Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
-		&Event{Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
-		&Event{Type: EvNodeHeld, NodeID: 2, HoldKind: HoldBlocked, Reason: "waiting", Actor: "a"},
-		&Event{Type: EvNodeCanceled, NodeID: 2, Reason: "stop", Actor: "a"},
+		&Event{EventID: "root", Type: EvNodeCreated, NodeID: 1, Kind: KindGoal, Intent: "root"},
+		&Event{EventID: "task", Type: EvNodeCreated, NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
+		&Event{EventID: "hold", Type: EvNodeHeld, NodeID: 2, HoldKind: HoldBlocked, Reason: "waiting", Actor: "a"},
+		&Event{EventID: "cancel", Type: EvNodeCanceled, NodeID: 2, Reason: "stop", Actor: "a"},
 	)
 	if state.Nodes[2].Hold != nil || state.Nodes[2].Claim != nil {
 		t.Fatalf("terminal task should not project active hold/claim: %+v", state.Nodes[2])
@@ -144,6 +144,108 @@ func TestModernVerifyCompletionRejectsScriptEvidenceIDs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires acceptance_run_set") {
 		t.Fatalf("expected modern script evidence_ids rejection, got %v", err)
 	}
+}
+
+func TestReducerRejectsMissingAndDuplicateEventIDs(t *testing.T) {
+	now := time.Now()
+	_, err := Apply([]*Event{{
+		Timestamp: now, Actor: "a", Type: EvNodeCreated,
+		NodeID: 1, Kind: KindGoal, Intent: "root",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "missing event_id") {
+		t.Fatalf("expected missing event_id rejection, got %v", err)
+	}
+
+	_, err = Apply([]*Event{
+		{EventID: "dup", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "dup", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate event_id dup") {
+		t.Fatalf("expected duplicate event_id rejection, got %v", err)
+	}
+}
+
+func TestVerifyCompletionRunSetCannotBypassOwnObligationCoverage(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: NewVerifyAcceptance("true"), Context: &NodeContext{SuccessObligations: []string{"api"}}},
+		{EventID: "claim", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			NodeID: 2, AttemptID: "attempt", LeaseID: "lease", LeaseExpiresAt: &exp},
+		{EventID: "run", Timestamp: now, Actor: "a", Type: EvScriptRun,
+			NodeID: 2, AttemptID: "attempt", Trigger: TriggerAcceptance, CheckName: DefaultVerifyCheckName, Cmd: "true", ExitCode: 0, StoreID: "root", ExecCWD: "/tmp/worker", ExecContextDigest: "ctx"},
+		{EventID: "runset", Timestamp: now, Actor: "a", Type: EvEvidence,
+			NodeID: 2, AttemptID: "attempt", EvidenceKind: EvidenceAcceptanceRunSet, EvidenceSummary: "acceptance run set", EvidenceData: verifyRunSetDataForTest("run", "ctx", true)},
+		{EventID: "done", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			NodeID: 2, AttemptID: "attempt", EvidenceID: "runset"},
+	}
+	_, err := Apply(events)
+	if err == nil || !strings.Contains(err.Error(), "uncovered success obligation") {
+		t.Fatalf("expected uncovered obligation rejection, got %v", err)
+	}
+}
+
+func TestVerifyCompletionRequiresRunSetExecutionContext(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: NewVerifyAcceptance("true")},
+		{EventID: "claim", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			NodeID: 2, AttemptID: "attempt", LeaseID: "lease", LeaseExpiresAt: &exp},
+		{EventID: "run", Timestamp: now, Actor: "a", Type: EvScriptRun,
+			NodeID: 2, AttemptID: "attempt", Trigger: TriggerAcceptance, CheckName: DefaultVerifyCheckName, Cmd: "true", ExitCode: 0, StoreID: "root", ExecCWD: "/tmp/worker", ExecContextDigest: "ctx"},
+		{EventID: "runset", Timestamp: now, Actor: "a", Type: EvEvidence,
+			NodeID: 2, AttemptID: "attempt", EvidenceKind: EvidenceAcceptanceRunSet, EvidenceSummary: "acceptance run set", EvidenceData: verifyRunSetDataForTest("run", "ctx", false)},
+		{EventID: "done", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			NodeID: 2, AttemptID: "attempt", EvidenceID: "runset"},
+	}
+	_, err := Apply(events)
+	if err == nil || !strings.Contains(err.Error(), "missing execution_context") {
+		t.Fatalf("expected missing execution_context rejection, got %v", err)
+	}
+}
+
+func TestAcceptanceRunSetRejectsConflictingContextDigestAliases(t *testing.T) {
+	raw := []byte(`{"acceptance_digest":"digest","context_digest":"old","exec_context_digest":"new","checks":[{"name":"unit","cmd":"true","script_run_event_id":"run"}]}`)
+	_, err := parseAcceptanceRunSetData(raw)
+	if err == nil || !strings.Contains(err.Error(), "conflicting context_digest") {
+		t.Fatalf("expected conflicting digest rejection, got %v", err)
+	}
+}
+
+func verifyRunSetDataForTest(runID string, digest string, includeExecutionContext bool) []byte {
+	data := AcceptanceRunSetData{
+		AcceptanceDigest:  acceptanceDigest(NewVerifyAcceptance("true").VerifyChecks()),
+		ContextDigest:     digest,
+		ExecContextDigest: digest,
+		StoreID:           "root",
+		ExecCWD:           "/tmp/worker",
+		GitIdentityDigest: digest,
+		Checks: []AcceptanceRunSetCheck{{
+			Name:             DefaultVerifyCheckName,
+			Cmd:              "true",
+			ScriptRunEventID: runID,
+		}},
+	}
+	if includeExecutionContext {
+		data.ExecutionContext = &AcceptanceExecutionContext{
+			StoreID:           "root",
+			ExecCWD:           "/tmp/worker",
+			ExecSurface:       ExecSurfaceShared,
+			WholeRepoDigest:   digest,
+			GitAvailable:      true,
+			GitIdentityDigest: digest,
+		}
+	}
+	return marshalAcceptanceRunSetData(data)
 }
 
 func TestApplyRejectsCorruptHistories(t *testing.T) {

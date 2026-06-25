@@ -3,6 +3,7 @@ package cst
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,14 @@ func (s *State) LazyAbandonExpired(now time.Time) []*Event {
 }
 
 func (s *State) applyOne(e *Event) error {
+	if strings.TrimSpace(e.EventID) == "" {
+		return fmt.Errorf("event missing event_id")
+	}
+	if s.EventIDs[e.EventID] {
+		return fmt.Errorf("duplicate event_id %s", e.EventID)
+	}
+	s.EventIDs[e.EventID] = true
+
 	switch e.Type {
 	case EvNodeCreated:
 		if _, dup := s.Nodes[e.NodeID]; dup {
@@ -727,7 +736,7 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 		if rec.NodeID != n.ID {
 			return fmt.Errorf("task_completed #%d evidence %s belongs to #%d", n.ID, evidenceID, rec.NodeID)
 		}
-		if e.AttemptID != "" && rec.AttemptID != "" && rec.AttemptID != e.AttemptID {
+		if e.AttemptID != "" && rec.AttemptID != e.AttemptID {
 			return fmt.Errorf("task_completed #%d evidence %s belongs to attempt %s", n.ID, evidenceID, rec.AttemptID)
 		}
 	}
@@ -741,7 +750,10 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 			if err := validateNodeBoundaryCompletion(n, runSet); err != nil {
 				return err
 			}
-			return s.validateCompletionBoundaryEvidence(n, runSet, ids)
+			if err := s.validateCompletionBoundaryEvidence(n, runSet, ids); err != nil {
+				return err
+			}
+			break
 		}
 		if len(ids) > 0 && !s.legacyVerifyCompletionScriptEvidence(n, e, ids) {
 			return fmt.Errorf("task_completed #%d verify completion requires acceptance_run_set evidence", n.ID)
@@ -767,8 +779,8 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 		if len(ids) == 0 {
 			return fmt.Errorf("task_completed #%d review acceptance requires evidence_id", n.ID)
 		}
-		if !hasReviewCompletionEvidence(s, ids) {
-			return fmt.Errorf("task_completed #%d review acceptance requires non-auxiliary evidence", n.ID)
+		if err := validateReviewCompletionEvidenceSet(s, n.ID, ids); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("task_completed #%d has unknown acceptance kind %q", n.ID, n.Acceptance.Kind)
@@ -830,17 +842,37 @@ func (s *State) legacyVerifyCompletionScriptEvidence(n *Node, e *Event, ids []st
 	return false
 }
 
-func hasReviewCompletionEvidence(s *State, ids []string) bool {
+func validateReviewCompletionEvidenceSet(s *State, nodeID int64, ids []string) error {
+	hasCompleting := false
 	for _, evidenceID := range ids {
 		rec := s.EvidenceIDs[evidenceID]
-		switch rec.Kind {
-		case EvidenceCommit, EvidenceContextDrift, EvidenceAcceptanceRunSet:
+		if reviewCompletionEvidenceKind(rec.Kind) {
+			hasCompleting = true
 			continue
-		default:
-			return true
 		}
+		if reviewAuxiliaryEvidenceKind(rec.Kind) {
+			continue
+		}
+		return fmt.Errorf("task_completed #%d review acceptance cannot use evidence %s kind %s", nodeID, evidenceID, rec.Kind)
 	}
-	return false
+	if !hasCompleting {
+		return fmt.Errorf("task_completed #%d review acceptance requires review evidence", nodeID)
+	}
+	return nil
+}
+
+func reviewCompletionEvidenceKind(kind string) bool {
+	switch kind {
+	case EvidenceNote, EvidenceFile, EvidenceURL, EvidenceRunID, EvidenceTest,
+		EvidenceVerifierContract, EvidenceReviewChecklist, EvidenceBoundary, EvidenceRationale:
+		return true
+	default:
+		return false
+	}
+}
+
+func reviewAuxiliaryEvidenceKind(kind string) bool {
+	return kind == EvidenceCommit
 }
 
 func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec EvidenceRecord) error {
@@ -892,6 +924,9 @@ func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec
 		if execContextDigestFromRun(run) != data.ContextDigest {
 			return fmt.Errorf("task_completed #%d run %s exec context mismatch", n.ID, run.EventID)
 		}
+	}
+	if data.ExecutionContext == nil {
+		return fmt.Errorf("task_completed #%d acceptance_run_set missing execution_context", n.ID)
 	}
 	return nil
 }

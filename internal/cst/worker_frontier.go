@@ -389,14 +389,17 @@ func completeEvidenceAdmissible(input FrontierInput, guard CompletionGuard, evid
 	if rec.NodeID != guard.NodeID {
 		return rejectf("evidence %s belongs to #%d", evidenceID, rec.NodeID)
 	}
-	if guard.ClaimAttemptID != "" && rec.AttemptID != "" && rec.AttemptID != guard.ClaimAttemptID {
+	if guard.ClaimAttemptID != "" && rec.AttemptID != guard.ClaimAttemptID {
 		return rejectf("evidence %s attempt mismatch", evidenceID)
 	}
 	if guard.AcceptanceKind == AcceptanceVerify && rec.Kind != EvidenceAcceptanceRunSet {
 		return rejectf("verify completion requires acceptance_run_set evidence, got %s", rec.Kind)
 	}
-	if guard.AcceptanceKind == AcceptanceReview && rec.Kind == EvidenceCommit {
-		return rejectf("commit evidence is auxiliary and cannot complete review acceptance")
+	if guard.AcceptanceKind == AcceptanceReview && !reviewCompletionEvidenceKind(rec.Kind) {
+		if reviewAuxiliaryEvidenceKind(rec.Kind) {
+			return rejectf("%s evidence is auxiliary and cannot complete review acceptance", rec.Kind)
+		}
+		return rejectf("review completion cannot use evidence kind %s", rec.Kind)
 	}
 	if guard.AcceptanceKind == AcceptanceVerify {
 		n := input.State.Nodes[guard.NodeID]
@@ -509,7 +512,7 @@ func acceptanceRunSetEvidence(n *Node) []EvidenceRecord {
 func reviewCompletionEvidence(n *Node) []EvidenceRecord {
 	var out []EvidenceRecord
 	for _, ev := range n.Evidences {
-		if ev.Kind != EvidenceCommit && ev.Kind != EvidenceAcceptanceRunSet && ev.Kind != EvidenceContextDrift {
+		if reviewCompletionEvidenceKind(ev.Kind) {
 			out = append(out, ev)
 		}
 	}

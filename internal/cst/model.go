@@ -144,6 +144,7 @@ type State struct {
 	Nodes       map[int64]*Node
 	Order       []int64 // creation order, useful for stable lists
 	NextID      int64
+	EventIDs    map[string]bool
 	EvidenceIDs map[string]EvidenceRecord
 	Attempts    map[string]*Attempt
 	Revision    Revision
@@ -157,6 +158,7 @@ func NewState() *State {
 		Nodes:       map[int64]*Node{},
 		Order:       nil,
 		NextID:      1,
+		EventIDs:    map[string]bool{},
 		EvidenceIDs: map[string]EvidenceRecord{},
 		Attempts:    map[string]*Attempt{},
 	}

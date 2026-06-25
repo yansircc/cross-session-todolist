@@ -120,6 +120,30 @@ func TestBoundaryEvidenceIncludesMustCoverChangedPaths(t *testing.T) {
 	}
 }
 
+func TestBoundaryEvidenceRejectsNonRepoRelativePaths(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "task", AcceptanceReview: "self"})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "absolute", data: `{"includes":["/tmp/cst"]}`},
+		{name: "escape", data: `{"excludes":["../runtime"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceBoundary, Summary: "boundary", Data: tc.data}, false)
+			if err == nil || !strings.Contains(err.Error(), "boundary evidence") {
+				t.Fatalf("expected boundary path rejection, got %v", err)
+			}
+		})
+	}
+}
+
 func TestRationaleEvidenceRejectsVacuousFields(t *testing.T) {
 	withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")

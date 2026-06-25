@@ -116,6 +116,9 @@ func parseAcceptanceRunSetData(raw json.RawMessage) (AcceptanceRunSetData, error
 	if data.AcceptanceDigest == "" {
 		return data, fmt.Errorf("acceptance_run_set missing acceptance_digest")
 	}
+	if data.ExecContextDigest != "" && data.ContextDigest != "" && data.ExecContextDigest != data.ContextDigest {
+		return data, fmt.Errorf("acceptance_run_set conflicting context_digest and exec_context_digest")
+	}
 	if data.ExecContextDigest == "" && data.ContextDigest == "" {
 		return data, fmt.Errorf("acceptance_run_set missing context digest")
 	}

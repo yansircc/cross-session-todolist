@@ -88,8 +88,15 @@ func parseBoundaryEvidence(raw json.RawMessage) (boundaryEvidenceData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return boundaryEvidenceData{}, fmt.Errorf("boundary evidence data must be JSON object: %w", err)
 	}
-	data.Includes = normalizeOwnedPaths(data.Includes)
-	data.Excludes = normalizeOwnedPaths(data.Excludes)
+	var err error
+	data.Includes, err = normalizeBoundaryPaths(data.Includes)
+	if err != nil {
+		return boundaryEvidenceData{}, fmt.Errorf("boundary evidence includes: %w", err)
+	}
+	data.Excludes, err = normalizeBoundaryPaths(data.Excludes)
+	if err != nil {
+		return boundaryEvidenceData{}, fmt.Errorf("boundary evidence excludes: %w", err)
+	}
 	for _, field := range []struct {
 		name   string
 		values []string

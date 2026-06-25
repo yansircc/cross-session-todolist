@@ -84,6 +84,74 @@ func TestWorkerFrontierCanonicalEquality(t *testing.T) {
 	})
 }
 
+func TestReviewFrontierRejectsProbeRunEvidence(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "review", AcceptanceReview: "self"})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRun(io.Discard, 2, "true", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	input := currentFrontierInput(t, 2)
+	if containsActionKind(LegalFrontier(input), ActionCompleteReviewWithEvidence) {
+		t.Fatalf("probe script_run must not complete review: %+v", LegalFrontier(input))
+	}
+	scriptID := latestEvidenceID(t, 2, EvidenceScript)
+	action := BoundAction{
+		Kind:       ActionCompleteReviewWithEvidence,
+		StoreRoot:  input.StoreRoot,
+		StoreID:    input.StoreID,
+		Revision:   input.Revision,
+		Actor:      input.Actor,
+		TaskID:     input.TaskID,
+		AttemptID:  input.State.Nodes[2].Claim.AttemptID,
+		EvidenceID: scriptID,
+	}
+	if Admissible(input, action).Accept {
+		t.Fatal("probe script_run evidence should be inadmissible for review completion")
+	}
+}
+
+func TestReviewFrontierRejectsPreClaimEvidence(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "review", AcceptanceReview: "self"})
+	if err := DoEvidence(io.Discard, 2, EvidenceArgs{Kind: EvidenceNote, Summary: "pre-claim note"}, false); err != nil {
+		t.Fatal(err)
+	}
+	preClaimID := latestEvidenceID(t, 2, EvidenceNote)
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+
+	input := currentFrontierInput(t, 2)
+	if containsActionKind(LegalFrontier(input), ActionCompleteReviewWithEvidence) {
+		t.Fatalf("pre-claim evidence must not produce review completion action: %+v", LegalFrontier(input))
+	}
+	action := BoundAction{
+		Kind:       ActionCompleteReviewWithEvidence,
+		StoreRoot:  input.StoreRoot,
+		StoreID:    input.StoreID,
+		Revision:   input.Revision,
+		Actor:      input.Actor,
+		TaskID:     input.TaskID,
+		AttemptID:  input.State.Nodes[2].Claim.AttemptID,
+		EvidenceID: preClaimID,
+	}
+	if Admissible(input, action).Accept {
+		t.Fatal("pre-claim evidence should be inadmissible for current review attempt")
+	}
+	err := DoDone(io.Discard, 2, DoneArgs{EvidenceID: preClaimID}, false)
+	if err == nil || !strings.Contains(err.Error(), "belongs to attempt") {
+		t.Fatalf("expected reducer attempt rejection, got %v", err)
+	}
+}
+
 func TestWorkerFrontierRejectsDriftedRunSet(t *testing.T) {
 	central := t.TempDir()
 	worker := t.TempDir()
