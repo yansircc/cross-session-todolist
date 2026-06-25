@@ -12,13 +12,17 @@ mkdir -p "$central" "$worker"
 go build -o "$bin" ./cmd/cst
 
 "$bin" --store "$central" add --intent "root" >/dev/null
+mkdir -p "$central/nested/path"
+(cd "$central/nested/path" && "$bin" show 1 >/dev/null)
+
 "$bin" --store "$central" add --parent 1 --intent "worker task" \
+  --exec-cwd "$worker" \
   --check side-effect="printf worker | tee side-effect.txt" \
   --check real="test -f side-effect.txt" >/dev/null
 "$bin" --store "$central" take 2 >/dev/null
 
 runset_json="$tmp/runset.json"
-"$bin" --store "$central" run 2 --exec-cwd "$worker" --acceptance >"$runset_json"
+"$bin" --store "$central" run 2 --acceptance >"$runset_json"
 runset_id="$(awk -F'"' '/"event_id":/ {print $4; exit}' "$runset_json")"
 test -n "$runset_id"
 

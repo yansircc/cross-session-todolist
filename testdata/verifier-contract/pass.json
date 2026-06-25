@@ -5,7 +5,7 @@
   ],
   "verifier_scripts": [
     {"path": "scripts/verify-contract-lock", "sha256": "720c596ba7936102cc72940f5d304de0e67b89bddca4692f339315a247a49e3c"},
-    {"path": "cmd/verify-contract-lock/main.go", "sha256": "05753af9237ae52435448ceb97c879e93ef03beac430ae368f3d4ef06b1e1b8d"}
+    {"path": "cmd/verify-contract-lock/main.go", "sha256": "d9f73c2579d861b5e12fde245ba9b16af9e1a7acedfda991cf0155f8e7b38fd4"}
   ],
   "manifest": {"path": "testdata/verifier-contract/pass-manifest.json", "sha256": "2469f4559b70b142622604400a6c98ec9ba98c0ece47da5a8ff6f58819f8a880", "count": 1},
   "cheapest_plausible_lie": "partial output passes",

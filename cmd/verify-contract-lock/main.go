@@ -78,6 +78,10 @@ func main() {
 }
 
 func verify(path string) error {
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -89,13 +93,13 @@ func verify(path string) error {
 	if !validRef(c.CanonicalSource.Ref) {
 		return fmt.Errorf("canonical_source.ref is not stable: %q", c.CanonicalSource.Ref)
 	}
-	if err := verifyArtifacts("contract_artifacts", c.ContractArtifacts); err != nil {
+	if err := verifyArtifacts(root, "contract_artifacts", c.ContractArtifacts); err != nil {
 		return err
 	}
-	if err := verifyArtifacts("verifier_scripts", c.VerifierScripts); err != nil {
+	if err := verifyArtifacts(root, "verifier_scripts", c.VerifierScripts); err != nil {
 		return err
 	}
-	if err := verifyHash("manifest", c.Manifest.Path, c.Manifest.SHA256); err != nil {
+	if err := verifyHash(root, "manifest", c.Manifest.Path, c.Manifest.SHA256); err != nil {
 		return err
 	}
 	if c.Manifest.Count < 0 {
@@ -114,10 +118,10 @@ func verify(path string) error {
 		if run.ExpectedExit == 0 || run.ObservedExit == 0 {
 			return fmt.Errorf("red_case_runs[%d] must record a failing expected_exit and observed_exit", i)
 		}
-		if err := verifyHash(fmt.Sprintf("red_case_runs[%d].diff", i), run.DiffPath, run.DiffSHA256); err != nil {
+		if err := verifyHash(root, fmt.Sprintf("red_case_runs[%d].diff", i), run.DiffPath, run.DiffSHA256); err != nil {
 			return err
 		}
-		if err := verifyHash(fmt.Sprintf("red_case_runs[%d].stderr", i), run.StderrPath, run.StderrSHA256); err != nil {
+		if err := verifyHash(root, fmt.Sprintf("red_case_runs[%d].stderr", i), run.StderrPath, run.StderrSHA256); err != nil {
 			return err
 		}
 	}
@@ -129,26 +133,30 @@ func verify(path string) error {
 	return nil
 }
 
-func verifyArtifacts(field string, artifacts []artifact) error {
+func verifyArtifacts(root string, field string, artifacts []artifact) error {
 	if len(artifacts) == 0 {
 		return fmt.Errorf("%s must be non-empty", field)
 	}
 	for i, a := range artifacts {
-		if err := verifyHash(fmt.Sprintf("%s[%d]", field, i), a.Path, a.SHA256); err != nil {
+		if err := verifyHash(root, fmt.Sprintf("%s[%d]", field, i), a.Path, a.SHA256); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func verifyHash(label string, path string, want string) error {
+func verifyHash(root string, label string, path string, want string) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("%s path is required", label)
 	}
 	if !sha256RE.MatchString(want) {
 		return fmt.Errorf("%s sha256 is invalid", label)
 	}
-	got, err := fileSHA256(path)
+	fullPath, err := rootedArtifactPath(root, path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	got, err := fileSHA256(fullPath)
 	if err != nil {
 		return fmt.Errorf("%s: %w", label, err)
 	}
@@ -156,6 +164,22 @@ func verifyHash(label string, path string, want string) error {
 		return fmt.Errorf("%s hash mismatch for %s: got %s want %s", label, filepath.Clean(path), got, want)
 	}
 	return nil
+}
+
+func rootedArtifactPath(root string, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if filepath.IsAbs(path) {
+		return "", fmt.Errorf("path %q must be relative to verifier root", path)
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	clean = strings.TrimPrefix(clean, "./")
+	if clean == "" || clean == "." {
+		return "", fmt.Errorf("path %q must name a file", path)
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path %q escapes verifier root", path)
+	}
+	return filepath.Join(root, filepath.FromSlash(clean)), nil
 }
 
 func fileSHA256(path string) (string, error) {

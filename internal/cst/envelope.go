@@ -2,7 +2,6 @@ package cst
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,14 +20,13 @@ func normalizeExecutionEnvelope(env *ExecutionEnvelope) (*ExecutionEnvelope, err
 	if env == nil {
 		return nil, nil
 	}
+	ownedPaths, err := normalizeScopePaths(env.OwnedPaths)
+	if err != nil {
+		return nil, err
+	}
 	out := &ExecutionEnvelope{
 		ExecSurface: env.ExecSurface,
-		OwnedPaths:  normalizeOwnedPaths(env.OwnedPaths),
-	}
-	for _, p := range out.OwnedPaths {
-		if filepath.IsAbs(p) {
-			return nil, fmt.Errorf("scope path %q must be relative to exec checkout", p)
-		}
+		OwnedPaths:  ownedPaths,
 	}
 	if out.ExecSurface == "" {
 		out.ExecSurface = ExecSurfaceShared
@@ -48,6 +46,19 @@ func normalizeExecutionEnvelope(env *ExecutionEnvelope) (*ExecutionEnvelope, err
 	}
 	if out.ExecCWD == "" && len(out.OwnedPaths) == 0 && out.ExecSurface == ExecSurfaceShared {
 		return nil, nil
+	}
+	return out, nil
+}
+
+func normalizeScopePaths(paths []string) ([]string, error) {
+	out := normalizeOwnedPaths(paths)
+	for _, p := range out {
+		if filepath.IsAbs(p) {
+			return nil, fmt.Errorf("scope path %q must be relative to exec checkout", p)
+		}
+		if p == ".." || strings.HasPrefix(p, "../") {
+			return nil, fmt.Errorf("scope path %q escapes the exec checkout", p)
+		}
 	}
 	return out, nil
 }
@@ -121,11 +132,6 @@ func normalizeOwnedPaths(paths []string) []string {
 		if p == "" {
 			p = "."
 		}
-		if filepath.IsAbs(p) {
-			if rel, err := filepath.Rel(mustGetwd(), p); err == nil && !strings.HasPrefix(rel, "..") {
-				p = filepath.ToSlash(rel)
-			}
-		}
 		if !seen[p] {
 			seen[p] = true
 			out = append(out, p)
@@ -133,14 +139,6 @@ func normalizeOwnedPaths(paths []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func mustGetwd() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return cwd
 }
 
 func resolveExecCWD(override string, env ExecutionEnvelope) string {

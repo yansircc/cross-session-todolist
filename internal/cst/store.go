@@ -57,11 +57,11 @@ func SetActor(actor string) {
 
 func ResolveStorePaths(root string) (StorePaths, error) {
 	if root == "" {
-		cwd, err := os.Getwd()
+		defaultRoot, err := DefaultStoreRoot()
 		if err != nil {
 			return StorePaths{}, err
 		}
-		root = cwd
+		root = defaultRoot
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -74,6 +74,37 @@ func ResolveStorePaths(root string) (StorePaths, error) {
 		EventsPath: filepath.Join(storeDir, eventsFile),
 		LockPath:   filepath.Join(storeDir, lockFile),
 	}, nil
+}
+
+func DefaultStoreRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root, ok := nearestAncestorWithEntry(cwd, StoreDirName); ok {
+		return root, nil
+	}
+	if root, ok := nearestAncestorWithEntry(cwd, ".git"); ok {
+		return root, nil
+	}
+	return cwd, nil
+}
+
+func nearestAncestorWithEntry(start string, name string) (string, bool) {
+	abs, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return "", false
 }
 
 func CurrentStorePaths() (StorePaths, error) {

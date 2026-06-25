@@ -287,7 +287,11 @@ the shell command runs. They are independent axes. `--exec-cwd` on `add` or
 `revise` becomes the task default; `cst take <id> --exec-cwd ...` atomically
 binds the task envelope and claim in one ledger transaction. `--exec-cwd` on
 `run` / `done` is only a one-command override and does not mutate the task
-envelope. Events record
+envelope. Without `--store`, CST resolves the ambient ledger root by walking up
+to the nearest existing `.cst`; if none exists, it uses the enclosing git root
+before falling back to cwd. That discovery is not an explicit store binding and
+does not bypass worker-checkout guards. `--scope` paths are relative to the
+execution checkout, never absolute and never `..`-escaping. Events record
 `store_id` (the root `node_created.event_id`), `exec_cwd`, git
 head/branch/status, whole-repo diff hashes, scoped diff hashes when
 `--scope` exists, out-of-scope summaries, and full stdout/stderr artifact
@@ -308,9 +312,11 @@ are informational; the wrapper is the closed loop.
 
 When a worker checkout is explicitly bound through a central store and
 `--exec-cwd`, CST records a local worker binding outside the git work surface
-when possible. In that detectable worker checkout, mutating commands without
-explicit `--store` fail before opening a local ledger and print a recovery
-command such as `cst --store /central/repo take 12 --exec-cwd /worker/repo`.
+when possible. The binding is a cache: readers accept it only when its
+`store_id` matches the replayed central ledger root. In that detectable worker
+checkout, mutating commands without explicit `--store` fail before opening a
+local ledger and print a recovery command such as
+`cst --store /central/repo take 12 --exec-cwd /worker/repo`.
 This guard does not guess central stores; ordinary single-checkout repos without
 a worker binding keep normal ambient-store behavior.
 
@@ -377,10 +383,11 @@ external source of truth. If no such source exists, record the axis under
 must name a stable object such as `git:<sha>:<path>`, `path@<sha>`, or
 `url@<version>`. The ref is a declaration: CST and `contract-lock` validate its
 shape, not the remote object. Mechanical closure comes from the hash chain over
-contract artifacts, verifier scripts, manifests, and red-case outputs.
-`contract-lock` must rehash that chain; CST does not do that semantic check in
-the reducer. Red cases must reject the cheapest plausible lie with executed
-failure artifacts, not prose only.
+contract artifacts, verifier scripts, manifests, and red-case outputs. Those
+artifact paths are relative to the verifier root and cannot be absolute or
+escape with `..`. `contract-lock` must rehash that chain; CST does not do that
+semantic check in the reducer. Red cases must reject the cheapest plausible lie
+with executed failure artifacts, not prose only.
 
 ## Evidence
 

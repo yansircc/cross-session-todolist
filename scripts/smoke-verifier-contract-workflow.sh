@@ -5,6 +5,19 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+cat >"$tmp/escape-contract.json" <<'JSON'
+{
+  "canonical_source": {"ref": "git:1234567890abcdef:README.md"},
+  "contract_artifacts": [
+    {"path": "../outside.txt", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  ]
+}
+JSON
+if (cd "$repo_root" && scripts/verify-contract-lock --fixture "$tmp/escape-contract.json") >/dev/null 2>&1; then
+  echo "expected verifier contract escape path to fail" >&2
+  exit 1
+fi
+
 go build -o "$tmp/cst" "$repo_root/cmd/cst"
 mkdir -p "$tmp/store"
 

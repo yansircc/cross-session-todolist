@@ -121,7 +121,8 @@ Acceptance and readiness:
   artifacts/scripts outside the reducer; include the shim and real implementation
   such as cmd/verify-contract-lock/main.go. canonical_source.ref is a
   declaration; closure comes from the hash chain. CST records shape, not
-  verifier truth.
+  verifier truth. Contract artifact paths are relative to the verifier root and
+  cannot be absolute or escape with '..'.
 
 Evidence and scripts:
   cst run records script_run(trigger=probe) and does not change status.
@@ -135,12 +136,19 @@ Evidence and scripts:
     cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
     cst --store /central/repo worker-status 12 --human
     cst --store /central/repo worker-run 12 --action <action-id>
+  Without --store, CST walks up to the nearest existing .cst; if none exists,
+  it uses the enclosing git root before falling back to cwd. This is ambient
+  discovery, not an explicit store binding.
   --exec-cwd on add/revise becomes the task default. --exec-cwd on run/done is
   a one-command override. Private exec surfaces reject any final context drift.
   Shared surfaces reject scoped drift but record context_drift evidence and
   allow out-of-scope drift because shared checkout attribution is unknowable.
+  --scope paths are relative to the execution checkout, never absolute and never
+  ..-escaping.
   Detectable worker checkouts reject mutating commands without explicit --store
-  before opening a local ledger and print the bound recovery command.
+  before opening a local ledger and print the bound recovery command. Worker
+  binding sidecars are accepted only when their store_id matches the replayed
+  central ledger root.
   cst evidence records structured evidence; --data must be JSON.
   boundary evidence has {"includes":[],"excludes":[]} and is checked against the
   accepted diff. rationale evidence is structured attestation, projected and
@@ -173,6 +181,7 @@ Storage:
   .cst/events.jsonl   append-only event log; source of truth
   .cst/events.lock    advisory transaction lock; do not track as task state
   .cst/config.toml    optional budgets, timeouts, lease TTL, actor default
+  .cst/artifacts/     hash-checked run witness attachments referenced by events
 
 Global flags:
   --human   emit human-readable text

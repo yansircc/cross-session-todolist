@@ -201,7 +201,11 @@ func normalizeWorkerBinding(binding *WorkerStoreBinding) error {
 	if binding.ExecSurface != ExecSurfaceShared && binding.ExecSurface != ExecSurfacePrivate {
 		return fmt.Errorf("exec_surface must be %s or %s", ExecSurfaceShared, ExecSurfacePrivate)
 	}
-	binding.OwnedPaths = normalizeOwnedPaths(binding.OwnedPaths)
+	ownedPaths, err := normalizeScopePaths(binding.OwnedPaths)
+	if err != nil {
+		return err
+	}
+	binding.OwnedPaths = ownedPaths
 	return nil
 }
 

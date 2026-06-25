@@ -64,6 +64,9 @@ returns `phase=no-op` and no claims remain.
 Do not let process cwd imply identity across a session or worker boundary.
 
 - `--store <repo-root>` selects the central CST ledger owner.
+- Without `--store`, CST walks up to the nearest existing `.cst`; if none
+  exists, it uses the enclosing git root before falling back to cwd. This is
+  ambient discovery, not an explicit store binding.
 - `--exec-cwd <checkout-root>` on `add` / `revise` sets the task execution
   envelope; on `run` / `done` it is only a one-command override.
 - `--private-exec-cwd` marks the checkout as actor-private. Without it the
@@ -71,15 +74,18 @@ Do not let process cwd imply identity across a session or worker boundary.
 - `cst take <id> --exec-cwd ...` binds the task envelope and claim in one
   transaction, which is the worker setup path when the worker path is known.
 - `--scope <path>` declares owned paths for scoped drift checks and projection
-  noise reduction. Scope is a view, not truth: out-of-scope changes are still
-  recorded.
+  noise reduction. Scope paths are relative to the execution checkout, never
+  absolute and never `..`-escaping. Scope is a view, not truth: out-of-scope
+  changes are still recorded.
 - Events record `store_id` (root `node_created.event_id`), `exec_cwd`, git
   checkout identity, whole-repo and scoped diff hashes, out-of-scope summaries,
   and full log artifact references. They do not record absolute `store_root` as
   durable identity.
 - Detectable worker checkouts reject mutating commands without explicit
-  `--store` before opening a local ledger. Use the printed recovery command; do
-  not rerun from worker cwd with ambient store identity.
+  `--store` before opening a local ledger. Worker binding sidecars are accepted
+  only when their `store_id` matches the replayed central ledger root. Use the
+  printed recovery command; do not rerun from worker cwd with ambient store
+  identity.
 
 Worker acceptance flow:
 
@@ -210,8 +216,9 @@ machine-verified completeness for uncovered axes. `canonical_source.ref` must
 name a stable object such as `git:<sha>:<path>`, `path@<sha>`, or
 `url@<version>`. The ref is a declaration: CST and `contract-lock` validate its
 shape, not the remote object. Mechanical closure comes from the hash chain over
-contract artifacts, verifier scripts, manifests, and red-case outputs. Include
-both the lock shim and its real implementation, such as
+contract artifacts, verifier scripts, manifests, and red-case outputs. Artifact
+paths are relative to the verifier root and cannot be absolute or escape with
+`..`. Include both the lock shim and its real implementation, such as
 `cmd/verify-contract-lock/main.go`, in `verifier_scripts`. Red cases must reject
 the cheapest plausible lie with executed failure artifacts, not prose only.
 
