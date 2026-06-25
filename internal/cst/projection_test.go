@@ -379,3 +379,60 @@ func TestEventsRequireScopeAndDoNotRepairLeases(t *testing.T) {
 		t.Fatalf("filtered events wrong: %+v", filtered)
 	}
 }
+
+func TestReadProjectionsDoNotRepairExpiredClaims(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "reader")
+	seedExpiredClaim(t)
+
+	projections := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "next", run: func() error { return DoNext(io.Discard, true) }},
+		{name: "brief", run: func() error { return DoBrief(io.Discard, 0, true) }},
+		{name: "show", run: func() error { return DoShow(io.Discard, 2, true) }},
+		{name: "worker-status", run: func() error { return DoWorkerStatus(io.Discard, 2, true) }},
+		{name: "claims", run: func() error { return DoClaims(io.Discard, ClaimsArgs{}, true) }},
+		{name: "ui", run: func() error { return DoUI(io.Discard, UIArgs{Stdout: true}, true) }},
+	}
+	for _, projection := range projections {
+		t.Run(projection.name, func(t *testing.T) {
+			before := len(replayEvents(t))
+			if err := projection.run(); err != nil {
+				t.Fatal(err)
+			}
+			if after := len(replayEvents(t)); after != before {
+				t.Fatalf("%s appended events: before=%d after=%d", projection.name, before, after)
+			}
+		})
+	}
+	state := replayState(t)
+	if state.Nodes[2].Claim == nil {
+		t.Fatal("read projections should leave stale claim in ledger state")
+	}
+}
+
+func seedExpiredClaim(t *testing.T) {
+	t.Helper()
+	now := time.Now().Add(-2 * time.Hour)
+	expired := time.Now().Add(-time.Hour)
+	lock, err := AcquireLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Append(
+		&Event{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		&Event{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}},
+		&Event{EventID: "claim", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			NodeID: 2, LeaseID: "old", LeaseExpiresAt: &expired},
+	)
+	if releaseErr := lock.Release(); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}

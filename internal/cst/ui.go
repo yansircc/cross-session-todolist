@@ -107,14 +107,6 @@ func renderOnce(within int64) (renderResult, error) {
 	if err != nil {
 		return renderResult{}, err
 	}
-	if abandoned := state.LazyAbandonExpired(time.Now()); len(abandoned) > 0 {
-		all := append(append([]*Event{}, events...), abandoned...)
-		state, err = Apply(all)
-		if err != nil {
-			return renderResult{}, err
-		}
-		events = all
-	}
 	if within != 0 {
 		if _, ok := state.Nodes[within]; !ok {
 			return renderResult{}, herr(ExitNotFound, "node #%d not found", within)

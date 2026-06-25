@@ -86,17 +86,21 @@ func BuildNextView(input NextInput) (NextView, error) {
 		return view, nil
 	}
 
-	unreconciled := UnreconciledDiffs(input.State, input.StoreRoot)
-	if len(unreconciled) > 0 {
-		view.Phase = NextPhaseReconcile
-		view.Required = "reconcile-first"
-		view.UnreconciledDiffs = unreconciled
-		view.Repair = reconcileRepair(root.ID, unreconciled)
-		return view, nil
-	}
+	diffs := worktreeDiffs(input.StoreRoot)
 
 	if claim := currentActorClaim(input.State, input.Actor); claim != nil {
+		if unreconciled := unreconciledDiffsForTask(claim, diffs); len(unreconciled) > 0 {
+			return nextReconcile(view, root.ID, unreconciled), nil
+		}
 		return nextForClaim(input, view, claim)
+	}
+
+	if len(diffs) > 0 {
+		owner := singleDirtyOwner(input.State, diffs)
+		if owner == nil || !input.State.IsReadyTask(owner.ID) {
+			return nextReconcile(view, root.ID, diffs), nil
+		}
+		return nextForReadyTask(input, view, owner)
 	}
 
 	ready := input.State.HeadOpenTasks(1)
@@ -109,6 +113,13 @@ func BuildNextView(input NextInput) (NextView, error) {
 		view.Phase = NextPhaseFixObligation
 		view.Required = "repair"
 		view.Repair = obligationRepair(root.ID, coverage.Missing)
+		return view, nil
+	}
+
+	if rootNeedsModeledWork(input.State, root) {
+		view.Phase = NextPhaseWork
+		view.Required = "input"
+		view.Repair = firstWorkRepair(root.ID)
 		return view, nil
 	}
 
@@ -125,6 +136,14 @@ func BuildNextView(input NextInput) (NextView, error) {
 		Explanation: "No legal action is currently projected; inspect the bounded frontier.",
 	}
 	return view, nil
+}
+
+func nextReconcile(view NextView, parentID int64, diffs []UnreconciledDiffEntry) NextView {
+	view.Phase = NextPhaseReconcile
+	view.Required = "reconcile-first"
+	view.UnreconciledDiffs = diffs
+	view.Repair = reconcileRepair(parentID, diffs)
+	return view
 }
 
 func nextForClaim(input NextInput, view NextView, task *Node) (NextView, error) {
@@ -205,14 +224,25 @@ func UnreconciledDiffs(s *State, repoRoot string) []UnreconciledDiffEntry {
 		return nil
 	}
 	var out []UnreconciledDiffEntry
+	for _, entry := range worktreeDiffs(repoRoot) {
+		if !activeTaskBoundaryCoversPath(s, entry.Path) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func worktreeDiffs(repoRoot string) []UnreconciledDiffEntry {
+	if repoRoot == "" {
+		return nil
+	}
+	var out []UnreconciledDiffEntry
 	for _, entry := range statusEntries(repoRoot) {
 		path := strings.TrimSpace(entry.Path)
 		if path == "" || isCSTInternalPath(path) {
 			continue
 		}
-		if !activeTaskBoundaryCoversPath(s, path) {
-			out = append(out, UnreconciledDiffEntry{Code: entry.Code, Path: path})
-		}
+		out = append(out, UnreconciledDiffEntry{Code: entry.Code, Path: path})
 	}
 	return out
 }
@@ -230,6 +260,50 @@ func activeTaskBoundaryCoversPath(s *State, path string) bool {
 	return false
 }
 
+func unreconciledDiffsForTask(task *Node, diffs []UnreconciledDiffEntry) []UnreconciledDiffEntry {
+	if task == nil || task.Boundary == nil || len(task.Boundary.Owned) == 0 {
+		return diffs
+	}
+	var out []UnreconciledDiffEntry
+	for _, entry := range diffs {
+		if !pathInOwnedPaths(task.Boundary.Owned, entry.Path) || pathInOwnedPaths(task.Boundary.Excluded, entry.Path) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func singleDirtyOwner(s *State, diffs []UnreconciledDiffEntry) *Node {
+	var owner *Node
+	for _, entry := range diffs {
+		match := dirtyOwnerForPath(s, entry.Path)
+		if match == nil {
+			return nil
+		}
+		if owner == nil {
+			owner = match
+			continue
+		}
+		if owner.ID != match.ID {
+			return nil
+		}
+	}
+	return owner
+}
+
+func dirtyOwnerForPath(s *State, path string) *Node {
+	for _, id := range s.Order {
+		n := s.Nodes[id]
+		if n == nil || n.Kind != KindTask || n.Terminal() || n.Boundary == nil || len(n.Boundary.Owned) == 0 {
+			continue
+		}
+		if pathInOwnedPaths(n.Boundary.Owned, path) && !pathInOwnedPaths(n.Boundary.Excluded, path) {
+			return n
+		}
+	}
+	return nil
+}
+
 func currentActorClaim(s *State, actor string) *Node {
 	claims := s.CurrentClaims()
 	for _, n := range claims {
@@ -238,6 +312,13 @@ func currentActorClaim(s *State, actor string) *Node {
 		}
 	}
 	return nil
+}
+
+func rootNeedsModeledWork(s *State, root *Node) bool {
+	if root == nil {
+		return false
+	}
+	return s.SubtreeProgress(root.ID).TotalTasks == 0
 }
 
 func recommendedAction(actions []BoundAction) *BoundAction {
@@ -288,13 +369,25 @@ func obligationRepairForTask(task *Node, missing []string) *RepairContract {
 func obligationRepair(parentID int64, missing []string) *RepairContract {
 	commands := make([]string, 0, len(missing))
 	for _, obligation := range missing {
-		commands = append(commands, fmt.Sprintf(`cst add --parent %d --intent "<task intent>" --owned <repo-relative-path> --obligation-claim %s --check <name>="<verification command>"`, parentID, obligation))
+		commands = append(commands, fmt.Sprintf(`cst add --parent %d --intent "<task intent>" --owned "<repo-relative-path>" --obligation-claim %s --check unit="<verification command>"`, parentID, shellQuote(obligation)))
 	}
 	return &RepairContract{
 		Phase:         NextPhaseFixObligation,
 		RequiredInput: "task obligation claim",
 		Commands:      commands,
 		Explanation:   "Named success obligations must be covered by descendant leaf task obligation claims.",
+	}
+}
+
+func firstWorkRepair(parentID int64) *RepairContract {
+	return &RepairContract{
+		Phase:         NextPhaseWork,
+		RequiredInput: "workstream or task intent",
+		Commands: []string{
+			fmt.Sprintf(`cst add --parent %d --goal --intent "<workstream intent>" --invariant "<global invariant>"`, parentID),
+			fmt.Sprintf(`cst add --parent %d --intent "<task intent>" --owned "<repo-relative-path>" --check unit="<verification command>"`, parentID),
+		},
+		Explanation: "A root goal with no modeled work is not complete; add a workstream or first executable task.",
 	}
 }
 
@@ -307,7 +400,7 @@ func reconcileRepair(parentID int64, diffs []UnreconciledDiffEntry) *RepairContr
 		Phase:         NextPhaseReconcile,
 		RequiredInput: "task intent and verification command",
 		Commands: []string{
-			fmt.Sprintf(`cst add --parent %d --intent "<describe current work>" --owned %s --check <name>="<verification command>"`, parentID, path),
+			fmt.Sprintf(`cst add --parent %d --intent "<describe current work>" --owned %s --check unit="<verification command>"`, parentID, shellQuote(path)),
 		},
 		Explanation: "Uncommitted work must be covered by an active task node.boundary.owned before next projects further procedure.",
 	}
@@ -319,7 +412,7 @@ func isCSTInternalPath(path string) bool {
 }
 
 func DoNext(out io.Writer, asJSON bool) error {
-	return WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
 		view, err := BuildNextView(NextInputFromTx(tx))
 		if err != nil {
 			return err

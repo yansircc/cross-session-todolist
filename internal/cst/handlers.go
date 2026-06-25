@@ -520,7 +520,7 @@ func DoRunWithArgs(out io.Writer, id int64, args RunArgs, asJSON bool) error {
 }
 
 func DoWorkerStatus(out io.Writer, id int64, asJSON bool) error {
-	return WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
 		view, err := BuildWorkerStatus(FrontierInputFromTx(tx, id))
 		if err != nil {
 			return err
@@ -1048,7 +1048,7 @@ func DoBrief(out io.Writer, scopeID int64, asJSON bool) error {
 }
 
 func DoBriefWithOptions(out io.Writer, opts BriefOptions, asJSON bool) error {
-	return WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
 		bv, err := BuildBriefWithOptions(tx.state, tx.cfg, tx.actor, opts)
 		if err != nil {
 			return herr(ExitNotFound, "%s", err.Error())
@@ -1063,7 +1063,7 @@ func DoBriefWithOptions(out io.Writer, opts BriefOptions, asJSON bool) error {
 }
 
 func DoShow(out io.Writer, id int64, asJSON bool) error {
-	return WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
 		v, err := BuildShow(tx.state, id, tx.cfg)
 		if err != nil {
 			return herr(ExitNotFound, "%s", err.Error())

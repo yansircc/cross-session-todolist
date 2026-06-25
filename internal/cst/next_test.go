@@ -23,6 +23,22 @@ func TestNextProjectsInitForEmptyStore(t *testing.T) {
 	}
 }
 
+func TestNextRootOnlyStoreRequiresModeledWork(t *testing.T) {
+	withTempStore(t)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+
+	view := currentNextView(t)
+	if view.Phase == NextPhaseNoOp {
+		t.Fatalf("root-only store must not no-op: %+v", view)
+	}
+	if view.Phase != NextPhaseWork || view.Required != "input" || view.Repair == nil {
+		t.Fatalf("root-only store should request first modeled work: %+v", view)
+	}
+	if !strings.Contains(view.Repair.Commands[0], "cst add --parent 1") {
+		t.Fatalf("root-only repair should add work under root: %+v", view.Repair.Commands)
+	}
+}
+
 func TestNextProjectsReadyTaskTakeActionWithBriefing(t *testing.T) {
 	withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")
@@ -123,6 +139,62 @@ func TestNextDoesNotReconcileDiffCoveredByActiveNodeBoundary(t *testing.T) {
 	}
 }
 
+func TestNextSelectsDirtyOwnerTaskInsteadOfFirstReadyTask(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "first task",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"a"}},
+	})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "dirty owner",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"b"}},
+	})
+	writeFile(t, dir, "b/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.TaskID != 3 {
+		t.Fatalf("next should select dirty owner task, got %+v", view)
+	}
+}
+
+func TestNextReconcilesDirtyDiffOutsideCurrentClaimBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "claimed task",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"a"}},
+	})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "other owner",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"b"}},
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "b/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile {
+		t.Fatalf("dirty diff outside current claim should reconcile, got %+v", view)
+	}
+	if len(view.UnreconciledDiffs) != 1 || view.UnreconciledDiffs[0].Path != "b/work.txt" {
+		t.Fatalf("wrong unreconciled diff projection: %+v", view.UnreconciledDiffs)
+	}
+}
+
 func TestNextReconcilesDiffCoveredOnlyByCompletedNodeBoundary(t *testing.T) {
 	dir := withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")
@@ -151,6 +223,22 @@ func TestNextReconcilesDiffCoveredOnlyByCompletedNodeBoundary(t *testing.T) {
 	}
 }
 
+func TestNextReconcileRepairQuotesDirtyPath(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	writeFile(t, dir, "space dir/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile || view.Repair == nil || len(view.Repair.Commands) != 1 {
+		t.Fatalf("dirty path should produce reconcile repair: %+v", view)
+	}
+	if !strings.Contains(view.Repair.Commands[0], `--owned "space dir/work.txt"`) {
+		t.Fatalf("repair command should quote dirty path: %+v", view.Repair.Commands)
+	}
+}
+
 func TestNextReconcilesDirtyDiffWhenTaskHasNoBoundary(t *testing.T) {
 	dir := withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")
@@ -171,7 +259,7 @@ func TestNextReconcilesDirtyDiffWhenTaskHasNoBoundary(t *testing.T) {
 func currentNextView(t *testing.T) NextView {
 	t.Helper()
 	var view NextView
-	if err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+	if err := WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
 		var err error
 		view, err = BuildNextView(NextInputFromTx(tx))
 		return err
