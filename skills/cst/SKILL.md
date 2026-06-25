@@ -142,7 +142,8 @@ cst add --parent 2 --intent "Port parser declaration emit" \
 
 - child `owned` paths must be inside parent `owned` paths when the parent has a
   declared owned boundary.
-- sibling `owned` paths cannot overlap.
+- active sibling `owned` paths cannot overlap; completed and canceled sibling
+  boundaries remain historical evidence and do not reserve those paths forever.
 - verify completion rejects accepted diffs outside the task `owned` boundary or
   inside its `excluded` boundary.
 - named `success_obligations` in a subtree must be covered by descendant static
@@ -174,9 +175,10 @@ context fold, local boundary, upstream/downstream edges, local acceptance,
 obligation claims, success coverage, and partition warnings. This projection
 makes global context recoverable; it does not prove the agent understood prose.
 
-`cst next` reconcile uses node `boundary.owned` as task-tree ownership.
-`execution.scope` / `OwnedPaths` is only execution identity and drift detection;
-do not use it to decide whether a diff belongs to a task.
+`cst next` reconcile uses active task `boundary.owned` as task-tree ownership.
+Completed task boundaries are historical evidence, not current ownership for
+new dirty work. `execution.scope` / `OwnedPaths` is only execution identity and
+drift detection; do not use it to decide whether a diff belongs to a task.
 
 ## Verifier Contracts
 

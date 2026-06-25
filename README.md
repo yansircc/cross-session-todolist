@@ -123,7 +123,8 @@ Reducer-checked boundary algebra:
 
 - child `owned` paths must sit inside parent `owned` paths when the parent has
   an owned boundary;
-- sibling `owned` paths must not overlap;
+- active sibling `owned` paths must not overlap; completed and canceled sibling
+  boundaries remain historical evidence and do not reserve those paths forever;
 - verify completion rejects accepted diffs outside the task's `owned` boundary
   or inside its `excluded` boundary.
 
@@ -164,8 +165,10 @@ direct upstream/downstream edges, acceptance obligation claims, success coverage
 and partition warnings. This makes global context visible before implementation;
 it does not prove the developer understood it.
 
-`next` reconcile uses `node.boundary` only. `execution.scope` / `OwnedPaths` is
-execution identity and drift detection; it is not task-tree ownership.
+`next` reconcile uses active task `node.boundary` only. A completed task
+boundary that once covered a path is historical evidence, not current ownership
+for new dirty work. `execution.scope` / `OwnedPaths` is execution identity and
+drift detection; it is not task-tree ownership.
 
 If a task cannot continue now:
 

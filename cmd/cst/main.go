@@ -79,8 +79,9 @@ Read semantics:
   cst next is the repo-level procedure projection. It is read-only: no procedure
   state is stored. It returns a phase, a single recommended bound action when
   one is legal, or a minimal repair contract with copyable command templates.
-  Its reconcile phase checks uncommitted paths against node.boundary only;
-  execution scope is not task ownership.
+  Its reconcile phase checks uncommitted paths against active task node.boundary
+  only; completed task boundaries are historical evidence, not current
+  ownership. Execution scope is not task ownership.
   cst brief is the bounded work projection. By default it is frontier-first:
   active child subtrees are expanded and completed child subtrees are counted.
   Use cst brief --history to inspect completed child subtrees and historical
@@ -96,8 +97,10 @@ Read semantics:
 Node briefing:
   Use --invariant, --non-goal, and --success-obligation on any goal/task to
   declare node-local context. Use --owned and --excluded to declare a node
-  boundary once; it is reused for briefing and accepted-diff validation. Use
-  --obligation-claim on static leaf tasks to claim named success obligations.
+  boundary once; active sibling owned paths cannot overlap, while terminal
+  boundaries remain historical evidence. Boundary is reused for briefing and
+  accepted-diff validation. Use --obligation-claim on static leaf tasks to claim
+  named success obligations.
   show, take, worker-status, and ui derive the same developer briefing by
   walking root->node: context fold, local boundary, upstream/downstream edges,
   local acceptance, obligation claims, success coverage, and partition warnings.
