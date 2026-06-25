@@ -4,16 +4,33 @@ package cst
 // surface narrow: progress index, one selected task detail, and folded context.
 const uiCSS = `
   :root{
-    color-scheme:light;
+    color-scheme:light dark;
     --bg:#ffffff;
     --ink:#111111;
     --muted:#6b7280;
     --line:#f0f0f0;
     --soft:#fafafa;
     --accent:#2563eb;
+    --accent-soft:#eff6ff;
     --success:#10b981;
+    --success-soft:#ecfdf5;
+    --warning:#b45309;
     --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
     --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0b0f14;
+      --ink:#f3f4f6;
+      --muted:#9ca3af;
+      --line:#1f2937;
+      --soft:#111827;
+      --accent:#60a5fa;
+      --accent-soft:#172554;
+      --success:#34d399;
+      --success-soft:#052e2b;
+      --warning:#fbbf24;
+    }
   }
   *{box-sizing:border-box}
   html,body{margin:0;min-height:100%}
@@ -144,7 +161,7 @@ const uiCSS = `
   .state-line.claimed{color:var(--accent)}
   .state-line.done{color:var(--success)}
   .state-line.held,
-  .state-line.failed{color:#b45309}
+  .state-line.failed{color:var(--warning)}
   .brief{
     max-width:70ch;
     margin-bottom:28px;
@@ -225,11 +242,11 @@ const uiCSS = `
     font-size:12px;
   }
   .check.pass{
-    background:#ecfdf5;
+    background:var(--success-soft);
     color:var(--success);
   }
   .check.next{
-    background:#eff6ff;
+    background:var(--accent-soft);
     color:var(--accent);
   }
   .empty{

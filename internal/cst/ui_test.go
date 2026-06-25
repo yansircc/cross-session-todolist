@@ -37,6 +37,10 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 		`rules <span class="count">1</span>`,
 		`edges <span class="count">0</span>`,
 		`<style>`,
+		`color-scheme:light dark`,
+		`@media (prefers-color-scheme:dark)`,
+		`--accent-soft:#172554`,
+		`background:var(--success-soft)`,
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(html, want) {
