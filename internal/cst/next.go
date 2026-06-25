@@ -128,13 +128,6 @@ func BuildNextView(input NextInput) (NextView, error) {
 }
 
 func nextForClaim(input NextInput, view NextView, task *Node) (NextView, error) {
-	if repair := boundaryRepairIfMissing(task); repair != nil {
-		view.Phase = NextPhaseFixBoundary
-		view.Required = "repair"
-		view.Briefing = BuildDeveloperBriefing(input.State, task.ID)
-		view.Repair = repair
-		return view, nil
-	}
 	if repair := taskObligationRepair(input.State, task); repair != nil {
 		view.Phase = NextPhaseFixObligation
 		view.Required = "repair"
@@ -182,12 +175,6 @@ func nextForClaim(input NextInput, view NextView, task *Node) (NextView, error) 
 
 func nextForReadyTask(input NextInput, view NextView, task *Node) (NextView, error) {
 	view.Briefing = BuildDeveloperBriefing(input.State, task.ID)
-	if repair := boundaryRepairIfMissing(task); repair != nil {
-		view.Phase = NextPhaseFixBoundary
-		view.Required = "repair"
-		view.Repair = repair
-		return view, nil
-	}
 	if repair := taskObligationRepair(input.State, task); repair != nil {
 		view.Phase = NextPhaseFixObligation
 		view.Required = "repair"
@@ -268,28 +255,6 @@ func recommendedAction(actions []BoundAction) *BoundAction {
 		}
 	}
 	return nil
-}
-
-func boundaryRepairIfMissing(task *Node) *RepairContract {
-	if task == nil || task.Kind != KindTask || (task.Boundary != nil && len(task.Boundary.Owned) > 0) {
-		return nil
-	}
-	commands := []string{
-		fmt.Sprintf(`cst revise %d --owned <repo-relative-path> --reason "declare task boundary before execution"`, task.ID),
-	}
-	if task.Claim != nil {
-		commands = []string{
-			fmt.Sprintf("cst release %d", task.ID),
-			fmt.Sprintf(`cst revise %d --owned <repo-relative-path> --reason "declare task boundary before execution"`, task.ID),
-			fmt.Sprintf("cst take %d", task.ID),
-		}
-	}
-	return &RepairContract{
-		Phase:         NextPhaseFixBoundary,
-		RequiredInput: "owned path",
-		Commands:      commands,
-		Explanation:   "A task needs node.boundary.owned before next can project a compliant work action.",
-	}
 }
 
 func taskObligationRepair(s *State, task *Node) *RepairContract {

@@ -69,18 +69,15 @@ func TestNextProjectsCompleteBeforeRerunForAcceptedClaim(t *testing.T) {
 	}
 }
 
-func TestNextRepairsMissingTaskBoundaryBeforeWorkAction(t *testing.T) {
+func TestNextAllowsNoDiffReviewTaskWithoutBoundary(t *testing.T) {
 	withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")
 	mustDoAdd(t, AddArgs{Intent: "root"})
-	mustDoAdd(t, AddArgs{Parent: 1, Intent: "task", AcceptanceVerify: "true"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "review", AcceptanceReview: "self"})
 
 	view := currentNextView(t)
-	if view.Phase != NextPhaseFixBoundary || view.Action != nil {
-		t.Fatalf("missing boundary should block work action: %+v", view)
-	}
-	if view.Repair == nil || view.Repair.Phase != NextPhaseFixBoundary || !strings.Contains(strings.Join(view.Repair.Commands, "\n"), "cst revise 2 --owned") {
-		t.Fatalf("missing boundary repair not actionable: %+v", view.Repair)
+	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.Kind != ActionTakeReadyTask {
+		t.Fatalf("no-diff review task should project work action without boundary repair: %+v", view)
 	}
 }
 
@@ -123,6 +120,23 @@ func TestNextDoesNotReconcileDiffCoveredByActiveNodeBoundary(t *testing.T) {
 	view := currentNextView(t)
 	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.Kind != ActionTakeReadyTask {
 		t.Fatalf("diff covered by active node boundary should allow work action: %+v", view)
+	}
+}
+
+func TestNextReconcilesDirtyDiffWhenTaskHasNoBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "task", AcceptanceVerify: "true"})
+	writeFile(t, dir, "src/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile || view.Repair == nil || view.Repair.Phase != NextPhaseReconcile {
+		t.Fatalf("dirty diff without node boundary should require reconcile: %+v", view)
+	}
+	if len(view.UnreconciledDiffs) != 1 || view.UnreconciledDiffs[0].Path != "src/work.txt" {
+		t.Fatalf("wrong dirty diff projection: %+v", view.UnreconciledDiffs)
 	}
 }
 
