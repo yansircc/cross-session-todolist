@@ -178,7 +178,7 @@ type gitStatusEntry struct {
 }
 
 func statusEntries(dir string) []gitStatusEntry {
-	raw, ok := gitOutput(dir, "status", "--porcelain=v1", "-z")
+	raw, ok := gitOutput(dir, "status", "--porcelain=v1", "--untracked-files=all", "-z")
 	if !ok || raw == "" {
 		return nil
 	}

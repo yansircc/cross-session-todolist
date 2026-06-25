@@ -1,0 +1,151 @@
+package cst
+
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestNextProjectsInitForEmptyStore(t *testing.T) {
+	withTempStore(t)
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseInit || view.Required != "input" {
+		t.Fatalf("wrong init projection: %+v", view)
+	}
+	if view.Repair == nil || view.Repair.Phase != NextPhaseInit || len(view.Repair.Commands) != 1 {
+		t.Fatalf("missing init repair: %+v", view.Repair)
+	}
+	if !strings.Contains(view.Repair.Commands[0], "cst add --intent") {
+		t.Fatalf("init repair command is not constructive: %+v", view.Repair.Commands)
+	}
+}
+
+func TestNextProjectsReadyTaskTakeActionWithBriefing(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	})
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.Kind != ActionTakeReadyTask {
+		t.Fatalf("wrong ready projection: %+v", view)
+	}
+	if view.Briefing == nil || view.Briefing.Boundary == nil || view.Briefing.Boundary.Owned[0] != "src" {
+		t.Fatalf("ready projection missing briefing: %+v", view.Briefing)
+	}
+}
+
+func TestNextProjectsCompleteBeforeRerunForAcceptedClaim(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseComplete || view.Action == nil || view.Action.Kind != ActionCompleteFromAcceptance {
+		t.Fatalf("next should recommend completion from fresh run-set: %+v", view)
+	}
+	if view.WorkerStatus == nil || len(view.WorkerStatus.Actions) < 2 {
+		t.Fatalf("next should reuse worker-status actions: %+v", view.WorkerStatus)
+	}
+}
+
+func TestNextRepairsMissingTaskBoundaryBeforeWorkAction(t *testing.T) {
+	withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Intent: "task", AcceptanceVerify: "true"})
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseFixBoundary || view.Action != nil {
+		t.Fatalf("missing boundary should block work action: %+v", view)
+	}
+	if view.Repair == nil || view.Repair.Phase != NextPhaseFixBoundary || !strings.Contains(strings.Join(view.Repair.Commands, "\n"), "cst revise 2 --owned") {
+		t.Fatalf("missing boundary repair not actionable: %+v", view.Repair)
+	}
+}
+
+func TestNextReconcileUsesNodeBoundaryNotExecutionScope(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		AcceptanceVerify: "true",
+		Envelope:         &ExecutionEnvelope{OwnedPaths: []string{"scope"}},
+		Boundary:         &NodeBoundary{Owned: []string{"owned"}},
+	})
+	writeFile(t, dir, "scope/drift.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile {
+		t.Fatalf("execution scope must not cover unreconciled diff: %+v", view)
+	}
+	if len(view.UnreconciledDiffs) != 1 || view.UnreconciledDiffs[0].Path != "scope/drift.txt" {
+		t.Fatalf("wrong unreconciled diff projection: %+v", view.UnreconciledDiffs)
+	}
+}
+
+func TestNextDoesNotReconcileDiffCoveredByActiveNodeBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		AcceptanceVerify: "true",
+		Boundary:         &NodeBoundary{Owned: []string{"owned"}},
+	})
+	writeFile(t, dir, "owned/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.Kind != ActionTakeReadyTask {
+		t.Fatalf("diff covered by active node boundary should allow work action: %+v", view)
+	}
+}
+
+func currentNextView(t *testing.T) NextView {
+	t.Helper()
+	var view NextView
+	if err := WithStore(TxOpts{Mutating: false, RepairLease: true}, func(tx *Tx) error {
+		var err error
+		view, err = BuildNextView(NextInputFromTx(tx))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
+func writeFile(t *testing.T, dir string, path string, data string) {
+	t.Helper()
+	full := filepath.Join(dir, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
