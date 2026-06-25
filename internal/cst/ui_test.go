@@ -152,6 +152,31 @@ func TestRenderHTML_ReviewReadyIsNotDoubleCountedAsReady(t *testing.T) {
 	}
 }
 
+func TestRenderHTML_PhasesUseLedgerOrderNotLastActivity(t *testing.T) {
+	withTempStore(t)
+	mustDoAdd(t, AddArgs{Intent: "Root"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase 1"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase 2"})
+	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Phase 1 task", AcceptanceVerify: "true"})
+	mustDoAdd(t, AddArgs{Parent: 3, Intent: "Phase 2 task", AcceptanceVerify: "true"})
+
+	state := replayState(t)
+	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
+	if len(v.ActivePhases) != 2 {
+		t.Fatalf("expected 2 active phases, got %d", len(v.ActivePhases))
+	}
+	if v.ActivePhases[0].Node.ID != 2 || v.ActivePhases[1].Node.ID != 3 {
+		t.Fatalf("phases should follow ledger order, got #%d then #%d", v.ActivePhases[0].Node.ID, v.ActivePhases[1].Node.ID)
+	}
+
+	html := renderHTML(v)
+	first := strings.Index(html, `id="phase-2"`)
+	second := strings.Index(html, `id="phase-3"`)
+	if first < 0 || second < 0 || first > second {
+		t.Errorf("rendered phases should follow ledger order\n%s", head(html, 3000))
+	}
+}
+
 func TestRenderHTML_EscapesIntent(t *testing.T) {
 	withTempStore(t)
 	// Root goal with a script tag in its intent

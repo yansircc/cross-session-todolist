@@ -64,7 +64,7 @@ Command surface:
   cst evidence <id> --kind note --summary "Process note..."
   cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
   cst done <task-id> --from-acceptance <evidence-id> [--commit <sha>]
-  cst done <task-id> [--evidence <event-id> | --note "..."]
+  cst done <task-id> [--evidence <event-id> ... | --note "..."]
   cst cancel <id> --reason "..."
 
 Agent loop:
@@ -76,7 +76,7 @@ Agent loop:
   6. Optional probe: cst run <id> [--cmd "..."].
   7. Finish: cst done <id> for verify acceptance; in worker mode use
      cst worker-status <id> then cst worker-run <id> --action <action-id>;
-     use cst done <id> --note "..." or cst done <id> --evidence <event-id>
+     use cst done <id> --note "..." or repeatable cst done <id> --evidence <event-id>
      for review acceptance,
      cst hold <id> --kind blocked|waiting|deferred --reason "...", or
      cst cancel <id> --reason "...".
@@ -88,7 +88,8 @@ Read semantics:
   Use cst brief --history to inspect completed child subtrees and historical
   recent runs/failures. It reports total/shown/truncated metadata for bounded
   collections.
-  cst show is a bounded single-node view with aggregate progress and previews.
+  cst show is a bounded single-node view with aggregate progress, completed
+  evidence ids, closure projection, and previews.
   cst claims and cst recover are read-only claim recovery projections. They
   show actor, task, attempt, lease staleness, and latest execution identity.
   cst events is the event-source reader and always requires an explicit range:
@@ -115,7 +116,7 @@ Evidence and scripts:
   cst run --acceptance records acceptance script_runs and acceptance_run_set
   without completing the task.
   cst done on a verify task records script_run(trigger=acceptance) for each check,
-  then records acceptance_run_set and points task_completed.evidence_id at it.
+  then records acceptance_run_set and includes it in task_completed.evidence_ids.
   cst worker-status projects bound legal worker actions. cst worker-run reprojects
   before execution and refuses stale action ids.
   Execution envelopes keep ledger and execution identities separate:
@@ -126,7 +127,13 @@ Evidence and scripts:
   a one-command override. Private exec surfaces reject any final context drift.
   Shared surfaces reject scoped drift but record context_drift evidence and
   allow out-of-scope drift because shared checkout attribution is unknowable.
+  Detectable worker checkouts reject mutating commands without explicit --store
+  before opening a local ledger and print the bound recovery command.
   cst evidence records structured evidence; --data must be JSON.
+  boundary evidence has {"includes":[],"excludes":[]} and is checked against the
+  accepted diff. rationale evidence is structured attestation, projected and
+  contestable, not reducer-proved. contest evidence marks boundary/rationale
+  evidence as contested for review.
   claim, script_run, evidence, and completion events from one claim share attempt_id.
   Process notes are evidence: use --kind note. Do not add task note fields or
   use cst as a scratchpad.
@@ -207,6 +214,16 @@ func main() {
 		return
 	}
 	args = args[1:]
+	if storeRoot == "" && commandMutates(cmd) {
+		if binding, ok, err := cst.DetectWorkerStoreBinding(""); err != nil {
+			fmt.Fprintln(os.Stderr, "cst:", err)
+			os.Exit(int(cst.ExitGenericError))
+		} else if ok {
+			recovery := cst.WorkerRecoveryCommand(cmd, args, binding)
+			fmt.Fprintln(os.Stderr, "cst:", cst.WorkerStoreGuardError(binding, recovery))
+			os.Exit(int(cst.ExitInvariantBroken))
+		}
+	}
 
 	switch cmd {
 	case "add":
@@ -256,6 +273,15 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "cst:", err)
 		os.Exit(int(cst.ExitGenericError))
+	}
+}
+
+func commandMutates(cmd string) bool {
+	switch cmd {
+	case "add", "revise", "take", "release", "hold", "run", "worker-run", "evidence", "done", "cancel":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -669,11 +695,12 @@ func runDone(args []string, asJSON bool) error {
 	}
 	fs := flag.NewFlagSet("done", flag.ContinueOnError)
 	format := addCommandFormatFlags(fs)
-	evidence := fs.String("evidence", "", "evidence event id")
+	var evidence stringListFlag
 	note := fs.String("note", "", "inline review note evidence")
 	execCWD := fs.String("exec-cwd", "", "checkout root for verify shell execution")
 	fromAcceptance := fs.String("from-acceptance", "", "acceptance_run_set evidence id")
 	commitSHA := fs.String("commit", "", "git commit sha to bind as auxiliary evidence")
+	fs.Var(&evidence, "evidence", "evidence event id (repeatable)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -682,7 +709,7 @@ func runDone(args []string, asJSON bool) error {
 		return err
 	}
 	return cst.DoDone(os.Stdout, id, cst.DoneArgs{
-		EvidenceID:       *evidence,
+		EvidenceIDs:      evidence.Values(),
 		Note:             *note,
 		ExecCWD:          *execCWD,
 		FromAcceptanceID: *fromAcceptance,

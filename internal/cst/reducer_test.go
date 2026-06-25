@@ -90,6 +90,62 @@ func TestLegacyGateEventsHydrateAcceptance(t *testing.T) {
 	}
 }
 
+func TestLegacyVerifyCompletionEvidenceIDCanReferenceFinalScriptRun(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: &Acceptance{
+				Kind: AcceptanceVerify,
+				Checks: []VerifyCheck{
+					{Name: "unit", Cmd: "go test ./..."},
+					{Name: "lint", Cmd: "git diff --check"},
+				},
+			}},
+		{EventID: "claim", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			AttemptID: "attempt", NodeID: 2, LeaseID: "lease", LeaseExpiresAt: &exp},
+		{EventID: "run-unit", Timestamp: now, Actor: "a", Type: EvScriptRun,
+			AttemptID: "attempt", NodeID: 2, Trigger: TriggerAcceptance, CheckName: "unit", Cmd: "go test ./...", ExitCode: 0},
+		{EventID: "run-lint", Timestamp: now, Actor: "a", Type: EvScriptRun,
+			AttemptID: "attempt", NodeID: 2, Trigger: TriggerAcceptance, CheckName: "lint", Cmd: "git diff --check", ExitCode: 0},
+		{EventID: "done", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			AttemptID: "attempt", NodeID: 2, EvidenceID: "run-lint"},
+	}
+
+	state, err := Apply(events)
+	if err != nil {
+		t.Fatalf("legacy completion rejected: %v", err)
+	}
+	task := state.Nodes[2]
+	if !task.Completed || task.CompletedEvidence != "run-lint" {
+		t.Fatalf("legacy completion projection mismatch: %+v", task)
+	}
+}
+
+func TestModernVerifyCompletionRejectsScriptEvidenceIDs(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root"},
+		{EventID: "task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindTask, Intent: "task", Acceptance: NewVerifyAcceptance("true")},
+		{EventID: "claim", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			AttemptID: "attempt", NodeID: 2, LeaseID: "lease", LeaseExpiresAt: &exp},
+		{EventID: "run", Timestamp: now, Actor: "a", Type: EvScriptRun,
+			AttemptID: "attempt", NodeID: 2, Trigger: TriggerAcceptance, CheckName: DefaultVerifyCheckName, Cmd: "true", ExitCode: 0},
+		{EventID: "done", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			AttemptID: "attempt", NodeID: 2, EvidenceIDs: []string{"run"}},
+	}
+
+	_, err := Apply(events)
+	if err == nil || !strings.Contains(err.Error(), "requires acceptance_run_set") {
+		t.Fatalf("expected modern script evidence_ids rejection, got %v", err)
+	}
+}
+
 func TestApplyRejectsCorruptHistories(t *testing.T) {
 	now := time.Now()
 	exp := now.Add(time.Hour)

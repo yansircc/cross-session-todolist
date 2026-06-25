@@ -53,6 +53,7 @@ type TakeArgs struct {
 
 type DoneArgs struct {
 	EvidenceID       string
+	EvidenceIDs      []string
 	Note             string
 	FromAcceptanceID string
 	ExecCWD          string
@@ -755,11 +756,12 @@ func sameCompletionGuard(a, b CompletionGuard) bool {
 // fresh transaction before committing — closing the TOCTOU window where
 // cancel/release could race the shell run.
 func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
-	if args.EvidenceID != "" && args.Note != "" {
+	args.EvidenceIDs = normalizeEvidenceIDs(append(args.EvidenceIDs, args.EvidenceID))
+	if len(args.EvidenceIDs) > 0 && args.Note != "" {
 		return herr(ExitUsage, "use only one of --evidence / --note")
 	}
-	if args.FromAcceptanceID != "" && (args.EvidenceID != "" || args.Note != "" || args.ExecCWD != "") {
-		return herr(ExitUsage, "--from-acceptance cannot be combined with --evidence, --note, or --exec-cwd")
+	if args.FromAcceptanceID != "" && (args.Note != "" || args.ExecCWD != "") {
+		return herr(ExitUsage, "--from-acceptance cannot be combined with --note or --exec-cwd")
 	}
 	if args.CommitSHA != "" && !validCommitSHA(args.CommitSHA) {
 		return herr(ExitUsage, "--commit requires a git commit sha")
@@ -794,7 +796,7 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if guard.AcceptanceKind == AcceptanceVerify && (args.EvidenceID != "" || args.Note != "") {
+	if guard.AcceptanceKind == AcceptanceVerify && args.FromAcceptanceID == "" && (len(args.EvidenceIDs) > 0 || args.Note != "") {
 		return herr(ExitUsage,
 			"verify acceptance records the successful acceptance run as evidence; do not pass --evidence or --note")
 	}
@@ -804,13 +806,18 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		}
 		var emitted *Event
 		err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
-			if _, err := validateAcceptanceContextForCompletion(tx, id, args.FromAcceptanceID, ""); err != nil {
+			evidenceIDs := append([]string{args.FromAcceptanceID}, args.EvidenceIDs...)
+			if ev, err := validateAcceptanceContextForCompletion(tx, id, args.FromAcceptanceID, ""); err != nil {
 				return err
+			} else if ev != nil {
+				evidenceIDs = append(evidenceIDs, ev.EventID)
 			}
-			if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+			if evID, err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
 				return err
+			} else if evID != "" {
+				evidenceIDs = append(evidenceIDs, evID)
 			}
-			ev, err := tx.CompleteTask(guard, args.FromAcceptanceID)
+			ev, err := tx.CompleteTask(guard, evidenceIDs)
 			if err != nil {
 				return err
 			}
@@ -828,18 +835,20 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	if guard.AcceptanceKind != AcceptanceVerify {
 		var emitted *Event
 		err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
-			evidenceID := args.EvidenceID
+			evidenceIDs := append([]string(nil), args.EvidenceIDs...)
 			if args.Note != "" {
 				ev, err := tx.RecordEvidence(id, EvidenceNote, args.Note, nil)
 				if err != nil {
 					return err
 				}
-				evidenceID = ev.EventID
+				evidenceIDs = append(evidenceIDs, ev.EventID)
 			}
-			if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+			if evID, err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
 				return err
+			} else if evID != "" {
+				evidenceIDs = append(evidenceIDs, evID)
 			}
-			ev, err := tx.CompleteTask(guard, evidenceID)
+			ev, err := tx.CompleteTask(guard, evidenceIDs)
 			if err != nil {
 				return err
 			}
@@ -904,13 +913,18 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 			return err
 		}
 		runSetEvent = ev
-		if _, err := validateAcceptanceContextForCompletion(tx, id, runSetEvent.EventID, effectiveExecCWD); err != nil {
+		evidenceIDs := []string{runSetEvent.EventID}
+		if ev, err := validateAcceptanceContextForCompletion(tx, id, runSetEvent.EventID, effectiveExecCWD); err != nil {
 			return err
+		} else if ev != nil {
+			evidenceIDs = append(evidenceIDs, ev.EventID)
 		}
-		if err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
+		if evID, err := recordCommitEvidenceIfRequested(tx, id, args.CommitSHA); err != nil {
 			return err
+		} else if evID != "" {
+			evidenceIDs = append(evidenceIDs, evID)
 		}
-		ev, err = tx.CompleteTask(guard, runSetEvent.EventID)
+		ev, err = tx.CompleteTask(guard, evidenceIDs)
 		if err != nil {
 			return err
 		}
@@ -942,19 +956,22 @@ func validCommitSHA(value string) bool {
 	return commitSHARE.MatchString(strings.TrimSpace(value))
 }
 
-func recordCommitEvidenceIfRequested(tx *Tx, id int64, sha string) error {
+func recordCommitEvidenceIfRequested(tx *Tx, id int64, sha string) (string, error) {
 	sha = strings.TrimSpace(sha)
 	if sha == "" {
-		return nil
+		return "", nil
 	}
 	raw, err := json.Marshal(struct {
 		SHA string `json:"sha"`
 	}{SHA: sha})
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = tx.RecordEvidence(id, EvidenceCommit, "commit "+sha, raw)
-	return err
+	ev, err := tx.RecordEvidence(id, EvidenceCommit, "commit "+sha, raw)
+	if err != nil {
+		return "", err
+	}
+	return ev.EventID, nil
 }
 
 func emitDone(out io.Writer, asJSON bool, ev *Event, runs []RunResult) {

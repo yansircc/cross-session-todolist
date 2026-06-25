@@ -26,6 +26,7 @@ type StorePaths struct {
 
 var storeRootMu sync.RWMutex
 var configuredStoreRoot string
+var configuredStoreRootExplicit bool
 var actorMu sync.RWMutex
 var configuredActor string
 
@@ -33,6 +34,7 @@ func SetStoreRoot(root string) error {
 	if root == "" {
 		storeRootMu.Lock()
 		configuredStoreRoot = ""
+		configuredStoreRootExplicit = false
 		storeRootMu.Unlock()
 		return nil
 	}
@@ -42,6 +44,7 @@ func SetStoreRoot(root string) error {
 	}
 	storeRootMu.Lock()
 	configuredStoreRoot = paths.Root
+	configuredStoreRootExplicit = true
 	storeRootMu.Unlock()
 	return nil
 }
@@ -78,6 +81,13 @@ func CurrentStorePaths() (StorePaths, error) {
 	root := configuredStoreRoot
 	storeRootMu.RUnlock()
 	return ResolveStorePaths(root)
+}
+
+func StoreRootExplicit() bool {
+	storeRootMu.RLock()
+	explicit := configuredStoreRootExplicit
+	storeRootMu.RUnlock()
+	return explicit
 }
 
 func (p StorePaths) RunArtifactsDir() string {

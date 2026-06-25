@@ -58,14 +58,15 @@ type RuleBrief struct {
 }
 
 type TaskBrief struct {
-	ID             int64   `json:"id"`
-	ParentID       int64   `json:"parent_id"`
-	Intent         string  `json:"intent"`
-	AcceptanceKind string  `json:"acceptance_kind,omitempty"`
-	After          []int64 `json:"after,omitempty"`
-	WaitingOn      []int64 `json:"waiting_on,omitempty"`
-	BlockedBy      []int64 `json:"blocked_by,omitempty"`
-	Inherited      []int64 `json:"inherited_rule_ids,omitempty"`
+	ID             int64              `json:"id"`
+	ParentID       int64              `json:"parent_id"`
+	Intent         string             `json:"intent"`
+	AcceptanceKind string             `json:"acceptance_kind,omitempty"`
+	After          []int64            `json:"after,omitempty"`
+	WaitingOn      []int64            `json:"waiting_on,omitempty"`
+	BlockedBy      []int64            `json:"blocked_by,omitempty"`
+	Inherited      []int64            `json:"inherited_rule_ids,omitempty"`
+	Closure        *ClosureProjection `json:"closure,omitempty"`
 }
 
 type HeldBrief struct {
@@ -243,6 +244,7 @@ func buildTaskBrief(s *State, t *Node) *TaskBrief {
 	tb.After = append([]int64(nil), t.After...)
 	tb.WaitingOn = s.WaitingOnIDs(t)
 	tb.BlockedBy = s.DependencyFailedIDs(t)
+	tb.Closure = closureProjection(t)
 	for _, r := range s.InheritedRules(t.ID) {
 		tb.Inherited = append(tb.Inherited, r.ID)
 	}
@@ -393,6 +395,9 @@ func renderTaskBriefLine(w io.Writer, t *TaskBrief) {
 	if len(t.BlockedBy) > 0 {
 		parts = append(parts, "blocked_by="+joinIDsBare(t.BlockedBy))
 	}
+	if summary := closureSummary(t.Closure); summary != "" {
+		parts = append(parts, "closure="+summary)
+	}
 	label := ""
 	if len(parts) > 0 {
 		label = " (" + strings.Join(parts, " ") + ")"
@@ -403,38 +408,40 @@ func renderTaskBriefLine(w io.Writer, t *TaskBrief) {
 // ShowView is the bounded record for a single node. Full event history is read
 // through `cst events --for <id>`.
 type ShowView struct {
-	Node               *NodeDetail       `json:"node"`
-	Status             string            `json:"status"`
-	Progress           *Progress         `json:"progress,omitempty"`
-	Lineage            []int64           `json:"lineage"`
-	InheritedRules     []*RuleBrief      `json:"inherited_rules,omitempty"`
-	Children           []*ChildBrief     `json:"children,omitempty"`
-	ChildrenMeta       *CollectionMeta   `json:"children_meta,omitempty"`
-	RecentRuns         []ScriptRunRecord `json:"recent_runs,omitempty"`
-	RecentRunsMeta     *CollectionMeta   `json:"recent_runs_meta,omitempty"`
-	RecentEvidence     []EvidenceRecord  `json:"recent_evidence,omitempty"`
-	RecentEvidenceMeta *CollectionMeta   `json:"recent_evidence_meta,omitempty"`
-	LatestContextDrift *EvidenceRecord   `json:"latest_context_drift,omitempty"`
+	Node               *NodeDetail        `json:"node"`
+	Status             string             `json:"status"`
+	Progress           *Progress          `json:"progress,omitempty"`
+	Lineage            []int64            `json:"lineage"`
+	InheritedRules     []*RuleBrief       `json:"inherited_rules,omitempty"`
+	Children           []*ChildBrief      `json:"children,omitempty"`
+	ChildrenMeta       *CollectionMeta    `json:"children_meta,omitempty"`
+	RecentRuns         []ScriptRunRecord  `json:"recent_runs,omitempty"`
+	RecentRunsMeta     *CollectionMeta    `json:"recent_runs_meta,omitempty"`
+	RecentEvidence     []EvidenceRecord   `json:"recent_evidence,omitempty"`
+	RecentEvidenceMeta *CollectionMeta    `json:"recent_evidence_meta,omitempty"`
+	LatestContextDrift *EvidenceRecord    `json:"latest_context_drift,omitempty"`
+	Closure            *ClosureProjection `json:"closure,omitempty"`
 }
 
 type NodeDetail struct {
-	ID                int64              `json:"id"`
-	ParentID          int64              `json:"parent_id,omitempty"`
-	Kind              string             `json:"kind"`
-	Intent            string             `json:"intent,omitempty"`
-	RuleText          string             `json:"rule_text,omitempty"`
-	Acceptance        *Acceptance        `json:"acceptance,omitempty"`
-	Envelope          *ExecutionEnvelope `json:"execution_envelope,omitempty"`
-	After             []int64            `json:"after,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
-	CreatedBy         string             `json:"created_by"`
-	CompletedAt       time.Time          `json:"completed_at,omitempty"`
-	CompletedEvidence string             `json:"completed_evidence_id,omitempty"`
-	CanceledAt        time.Time          `json:"canceled_at,omitempty"`
-	CanceledReason    string             `json:"canceled_reason,omitempty"`
-	Claim             *Claim             `json:"claim,omitempty"`
-	Hold              *Hold              `json:"hold,omitempty"`
-	LastEvent         time.Time          `json:"last_event,omitempty"`
+	ID                   int64              `json:"id"`
+	ParentID             int64              `json:"parent_id,omitempty"`
+	Kind                 string             `json:"kind"`
+	Intent               string             `json:"intent,omitempty"`
+	RuleText             string             `json:"rule_text,omitempty"`
+	Acceptance           *Acceptance        `json:"acceptance,omitempty"`
+	Envelope             *ExecutionEnvelope `json:"execution_envelope,omitempty"`
+	After                []int64            `json:"after,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
+	CreatedBy            string             `json:"created_by"`
+	CompletedAt          time.Time          `json:"completed_at,omitempty"`
+	CompletedEvidence    string             `json:"completed_evidence_id,omitempty"`
+	CompletedEvidenceIDs []string           `json:"completed_evidence_ids,omitempty"`
+	CanceledAt           time.Time          `json:"canceled_at,omitempty"`
+	CanceledReason       string             `json:"canceled_reason,omitempty"`
+	Claim                *Claim             `json:"claim,omitempty"`
+	Hold                 *Hold              `json:"hold,omitempty"`
+	LastEvent            time.Time          `json:"last_event,omitempty"`
 }
 
 type ChildBrief struct {
@@ -482,6 +489,7 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 	v.RecentEvidence = recentEvidenceForNode(n, cfg.BriefMaxRecent)
 	v.RecentEvidenceMeta = collectionMeta(len(n.Evidences), len(v.RecentEvidence))
 	v.LatestContextDrift = latestEvidenceOfKind(n, EvidenceContextDrift)
+	v.Closure = closureProjection(n)
 	for _, r := range s.InheritedRules(id) {
 		v.InheritedRules = append(v.InheritedRules, &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText})
 	}
@@ -509,6 +517,7 @@ func buildNodeDetail(n *Node) *NodeDetail {
 	if n.Completed {
 		d.CompletedAt = n.CompletedAt
 		d.CompletedEvidence = n.CompletedEvidence
+		d.CompletedEvidenceIDs = append([]string(nil), n.CompletedEvidenceIDs...)
 	}
 	if n.Canceled {
 		d.CanceledAt = n.CanceledAt
@@ -585,7 +594,11 @@ func RenderShowText(w io.Writer, v ShowView) {
 		fmt.Fprintf(w, "claim: actor=%s%s lease_until=%s\n", n.Claim.Actor, attempt, n.Claim.LeaseExpiresAt.Format(time.RFC3339))
 	}
 	if !n.CompletedAt.IsZero() {
-		fmt.Fprintf(w, "completed: at=%s evidence_id=%q\n", n.CompletedAt.Format(time.RFC3339), n.CompletedEvidence)
+		if len(n.CompletedEvidenceIDs) > 0 {
+			fmt.Fprintf(w, "completed: at=%s evidence_ids=%q\n", n.CompletedAt.Format(time.RFC3339), n.CompletedEvidenceIDs)
+		} else {
+			fmt.Fprintf(w, "completed: at=%s evidence_id=%q\n", n.CompletedAt.Format(time.RFC3339), n.CompletedEvidence)
+		}
 	}
 	if !n.CanceledAt.IsZero() {
 		fmt.Fprintf(w, "canceled: at=%s reason=%q\n", n.CanceledAt.Format(time.RFC3339), n.CanceledReason)
@@ -626,6 +639,19 @@ func RenderShowText(w io.Writer, v ShowView) {
 		fmt.Fprintf(w, "recent evidence:%s\n", metaSuffix(v.RecentEvidenceMeta))
 		for _, e := range v.RecentEvidence {
 			fmt.Fprintf(w, "  %s kind=%s %s\n", e.EventID, e.Kind, e.Summary)
+		}
+	}
+	if summary := closureSummary(v.Closure); summary != "" {
+		fmt.Fprintf(w, "closure: %s\n", summary)
+		for _, ev := range append(v.Closure.Boundary, v.Closure.Rationale...) {
+			contest := ""
+			if ev.Contested != nil {
+				contest = " contested=" + ev.Contested.EventID
+			}
+			fmt.Fprintf(w, "  %s %s %s%s\n", ev.EventID, ev.Kind, ev.Summary, contest)
+		}
+		for _, ev := range v.Closure.Contests {
+			fmt.Fprintf(w, "  contest %s target=%s %s\n", ev.EventID, ev.TargetEvidenceID, ev.Reason)
 		}
 	}
 	if v.LatestContextDrift != nil {
@@ -690,7 +716,12 @@ func RenderEventsText(w io.Writer, events []*Event) {
 			fmt.Fprintf(w, "%s  #%d  evidence kind=%s%s %q\n",
 				e.Timestamp.Format(time.RFC3339), e.NodeID, e.EvidenceKind, attemptSuffix(e.AttemptID), e.EvidenceSummary)
 		case EvTaskCompleted:
-			fmt.Fprintf(w, "%s  #%d  completed%s evidence_id=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, attemptSuffix(e.AttemptID), e.EvidenceID)
+			ids := completionEvidenceIDs(e)
+			if len(ids) > 0 {
+				fmt.Fprintf(w, "%s  #%d  completed%s evidence_ids=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, attemptSuffix(e.AttemptID), ids)
+			} else {
+				fmt.Fprintf(w, "%s  #%d  completed%s\n", e.Timestamp.Format(time.RFC3339), e.NodeID, attemptSuffix(e.AttemptID))
+			}
 		case EvNodeHeld:
 			fmt.Fprintf(w, "%s  #%d  held kind=%s reason=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, e.HoldKind, e.Reason)
 		case EvNodeUnheld:

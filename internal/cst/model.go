@@ -118,12 +118,13 @@ type Node struct {
 	Children []int64 `json:"children,omitempty"`
 
 	// terminal state
-	Completed         bool      `json:"completed,omitempty"`
-	CompletedAt       time.Time `json:"completed_at,omitempty"`
-	CompletedEvidence string    `json:"completed_evidence_id,omitempty"`
-	Canceled          bool      `json:"canceled,omitempty"`
-	CanceledAt        time.Time `json:"canceled_at,omitempty"`
-	CanceledReason    string    `json:"canceled_reason,omitempty"`
+	Completed            bool      `json:"completed,omitempty"`
+	CompletedAt          time.Time `json:"completed_at,omitempty"`
+	CompletedEvidence    string    `json:"completed_evidence_id,omitempty"`
+	CompletedEvidenceIDs []string  `json:"completed_evidence_ids,omitempty"`
+	Canceled             bool      `json:"canceled,omitempty"`
+	CanceledAt           time.Time `json:"canceled_at,omitempty"`
+	CanceledReason       string    `json:"canceled_reason,omitempty"`
 
 	// runtime
 	Claim     *Claim            `json:"claim,omitempty"`

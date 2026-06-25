@@ -63,7 +63,7 @@ cst --store /central/repo take 12 --exec-cwd /worker/repo --private-exec-cwd --s
    ```sh
    cst done <task-id>
    cst done <task-id> --note "reviewed locally"
-   cst done <task-id> --evidence <event-id>
+   cst done <task-id> --evidence <event-id> --evidence <event-id>
    cst hold <task-id> --kind blocked --reason "..."
    cst release <task-id>
    cst cancel <task-id> --reason "..."
@@ -89,6 +89,9 @@ Do not let process cwd imply identity across a session or worker boundary.
   checkout identity, whole-repo and scoped diff hashes, out-of-scope summaries,
   and full log artifact references. They do not record absolute `store_root` as
   durable identity.
+- Detectable worker checkouts reject mutating commands without explicit
+  `--store` before opening a local ledger. Use the printed recovery command; do
+  not rerun from worker cwd with ambient store identity.
 
 Worker acceptance flow:
 
@@ -101,6 +104,9 @@ cst --store /central/repo worker-run 12 --action <action-id>
 For verify tasks, ordinary `--note` / `--evidence` completion is still invalid.
 Completion evidence must be `acceptance_run_set`, which explicitly maps every
 declared check to the successful `script_run` event that satisfied it.
+Completions bind `evidence_ids`; use repeatable `--evidence` with
+`--from-acceptance` only for supplemental structured evidence that belongs to
+the same task.
 Private execution surfaces reject any final context drift. Shared surfaces
 reject scoped drift but record `evidence(kind=context_drift)` and allow
 completion for out-of-scope drift because shared checkouts cannot attribute that
@@ -110,6 +116,9 @@ change to one actor.
 `worker-run` reprojects the frontier at execution time and refuses stale action
 ids. The previewed `run --acceptance` / `done --from-acceptance` commands are
 informational; the action id is the executable worker handoff.
+
+`brief`, `show`, and `ui` project completed evidence ids, closure summaries, and
+contested state. Use those bounded projections before reading raw events.
 
 ## Modeling
 
@@ -183,6 +192,15 @@ cst evidence <id> --kind note --summary "..."
 ```
 
 Do not add task note fields or invent `cst note`.
+
+Closure evidence is first-class but split by verifiability:
+
+- `boundary`: JSON `{"includes":[...],"excludes":[...]}`. CST checks it against
+  the accepted diff at completion.
+- `rationale`: non-vacuous `invariant`, `failure`, `minimal_fix`,
+  `remaining_risk`, optional `not_doing`. This is attestation, not proof.
+- `contest`: targets a boundary/rationale evidence id and marks it contested for
+  review.
 
 `cst take` mints an `attempt_id`. Claim renewal/release, script runs, evidence,
 and completion from the same claim carry that id. Inspect one attempt with:

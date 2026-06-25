@@ -67,6 +67,7 @@ type taskRowView struct {
 	Commands    []string
 	LatestRun   *ScriptRunRecord
 	Evidence    *EvidenceRecord
+	Closure     *ClosureProjection
 }
 
 // uiViewFrom builds a uiView from State, scoped to a subtree rooted at scopeID.
@@ -138,17 +139,14 @@ func buildActivePhases(s *State, scopeID int64) []phaseView {
 	}
 
 	phases := make([]phaseView, 0, len(phaseIDs))
-	for id := range phaseIDs {
+	for _, id := range s.Order {
+		if _, ok := phaseIDs[id]; !ok {
+			continue
+		}
 		if p := buildPhaseView(s, s.Nodes[id]); p.Node != nil {
 			phases = append(phases, p)
 		}
 	}
-	sort.SliceStable(phases, func(i, j int) bool {
-		if !phases[i].LastActivity.Equal(phases[j].LastActivity) {
-			return phases[i].LastActivity.After(phases[j].LastActivity)
-		}
-		return phases[i].Node.ID < phases[j].Node.ID
-	})
 	return phases
 }
 
@@ -214,6 +212,7 @@ func buildTaskRow(s *State, n *Node) taskRowView {
 		BlockedBy:  s.DependencyFailedIDs(n),
 		Commands:   taskCommands(n),
 		Evidence:   latestHumanEvidence(n),
+		Closure:    closureProjection(n),
 	}
 	row.LatestRun = latestRun(n)
 	row.StateClass, row.StateLabel, row.StateDetail = taskFrontierState(s, n)

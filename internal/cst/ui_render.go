@@ -260,6 +260,16 @@ func renderTaskDetail(sb *strings.Builder, row taskRowView) {
 	if row.Evidence != nil && row.Evidence.Summary != "" {
 		fmt.Fprintf(sb, `<p>latest evidence: %s · %s</p>`, html.EscapeString(row.Evidence.Kind), html.EscapeString(row.Evidence.Summary))
 	}
+	if summary := closureSummary(row.Closure); summary != "" {
+		fmt.Fprintf(sb, `<p>closure: %s</p>`, html.EscapeString(summary))
+		for _, ev := range append(row.Closure.Boundary, row.Closure.Rationale...) {
+			contest := ""
+			if ev.Contested != nil {
+				contest = " · contested"
+			}
+			fmt.Fprintf(sb, `<p>closure evidence: %s · %s%s</p>`, html.EscapeString(ev.Kind), html.EscapeString(ev.Summary), html.EscapeString(contest))
+		}
+	}
 	sb.WriteString(`</details>`)
 }
 

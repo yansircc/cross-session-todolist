@@ -162,6 +162,7 @@ type Event struct {
 	Reason   string `json:"reason,omitempty"`
 
 	EvidenceID      string          `json:"evidence_id,omitempty"`
+	EvidenceIDs     []string        `json:"evidence_ids,omitempty"`
 	EvidenceKind    string          `json:"evidence_kind,omitempty"`
 	EvidenceSummary string          `json:"evidence_summary,omitempty"`
 	EvidenceData    json.RawMessage `json:"evidence_data,omitempty"`
@@ -183,6 +184,7 @@ func UnmarshalEvent(line []byte) (*Event, error) {
 	hydrateLegacyGate(&e)
 	hydrateLegacyVerifyCmd(&e)
 	hydrateLegacyTrigger(&e)
+	hydrateLegacyCompletionEvidence(&e)
 	e.LegacyGate = nil
 	return &e, nil
 }
@@ -218,6 +220,13 @@ func hydrateLegacyVerifyCmd(e *Event) {
 		e.Acceptance.Checks = []VerifyCheck{{Name: DefaultVerifyCheckName, Cmd: e.Acceptance.Cmd}}
 		e.Acceptance.Cmd = ""
 	}
+}
+
+func hydrateLegacyCompletionEvidence(e *Event) {
+	if e.Type != EvTaskCompleted || len(e.EvidenceIDs) != 0 || e.EvidenceID == "" {
+		return
+	}
+	e.EvidenceIDs = []string{e.EvidenceID}
 }
 
 func int64ListContains(values []int64, target int64) bool {

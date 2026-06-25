@@ -451,6 +451,21 @@ func (s *State) applyOne(e *Event) error {
 				return err
 			}
 		}
+		if e.EvidenceKind == EvidenceBoundary {
+			if err := validateBoundaryEvidence(e.EvidenceData); err != nil {
+				return err
+			}
+		}
+		if e.EvidenceKind == EvidenceRationale {
+			if err := validateRationaleEvidence(e.EvidenceData); err != nil {
+				return err
+			}
+		}
+		if e.EvidenceKind == EvidenceContest {
+			if err := s.validateContestEvidenceEvent(e); err != nil {
+				return err
+			}
+		}
 		if n.Claim != nil && n.Claim.Actor == e.Actor && n.Claim.AttemptID != "" && e.AttemptID == "" {
 			return fmt.Errorf("evidence_recorded on #%d missing attempt_id", e.NodeID)
 		}
@@ -510,7 +525,10 @@ func (s *State) applyOne(e *Event) error {
 		}
 		n.Completed = true
 		n.CompletedAt = e.Timestamp
-		n.CompletedEvidence = e.EvidenceID
+		n.CompletedEvidenceIDs = completionEvidenceIDs(e)
+		if len(n.CompletedEvidenceIDs) > 0 {
+			n.CompletedEvidence = n.CompletedEvidenceIDs[0]
+		}
 		n.Claim = nil
 		n.Hold = nil
 		n.LastEvent = e.Timestamp
@@ -652,34 +670,36 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 	if n.Acceptance == nil {
 		return fmt.Errorf("task_completed #%d has no acceptance", n.ID)
 	}
-	if e.EvidenceID != "" {
-		rec, ok := s.EvidenceIDs[e.EvidenceID]
+	ids := completionEvidenceIDs(e)
+	for _, evidenceID := range ids {
+		rec, ok := s.EvidenceIDs[evidenceID]
 		if !ok {
-			return fmt.Errorf("task_completed #%d references missing evidence %s", n.ID, e.EvidenceID)
+			return fmt.Errorf("task_completed #%d references missing evidence %s", n.ID, evidenceID)
 		}
 		if rec.NodeID != n.ID {
-			return fmt.Errorf("task_completed #%d evidence %s belongs to #%d", n.ID, e.EvidenceID, rec.NodeID)
+			return fmt.Errorf("task_completed #%d evidence %s belongs to #%d", n.ID, evidenceID, rec.NodeID)
 		}
 		if e.AttemptID != "" && rec.AttemptID != "" && rec.AttemptID != e.AttemptID {
-			return fmt.Errorf("task_completed #%d evidence %s belongs to attempt %s", n.ID, e.EvidenceID, rec.AttemptID)
+			return fmt.Errorf("task_completed #%d evidence %s belongs to attempt %s", n.ID, evidenceID, rec.AttemptID)
 		}
 	}
 	switch n.Acceptance.Kind {
 	case AcceptanceVerify:
-		if e.EvidenceID != "" {
-			rec := s.EvidenceIDs[e.EvidenceID]
-			if rec.Kind == EvidenceAcceptanceRunSet {
-				return s.validateAcceptanceRunSetCompletion(n, e, rec)
+		runSet, ok := s.completionRunSetEvidence(n.ID, ids)
+		if ok {
+			if err := s.validateAcceptanceRunSetCompletion(n, e, runSet); err != nil {
+				return err
 			}
+			return s.validateCompletionBoundaryEvidence(n, runSet, ids)
+		}
+		if len(ids) > 0 && !s.legacyVerifyCompletionScriptEvidence(n, e, ids) {
+			return fmt.Errorf("task_completed #%d verify completion requires acceptance_run_set evidence", n.ID)
 		}
 		for _, check := range n.Acceptance.VerifyChecks() {
 			matched := false
 			for i := len(n.Runs) - 1; i >= 0; i-- {
 				run := n.Runs[i]
-				if run.Trigger != TriggerAcceptance || run.Cmd != check.Cmd || run.ExitCode != 0 {
-					continue
-				}
-				if normalizedCheckName(run.CheckName) != check.Name {
+				if !scriptRunSatisfiesVerifyCheck(run, check) {
 					continue
 				}
 				if e.AttemptID != "" && run.AttemptID != e.AttemptID {
@@ -693,13 +713,80 @@ func (s *State) validateCompletionAcceptance(n *Node, e *Event) error {
 			}
 		}
 	case AcceptanceReview:
-		if e.EvidenceID == "" {
+		if len(ids) == 0 {
 			return fmt.Errorf("task_completed #%d review acceptance requires evidence_id", n.ID)
+		}
+		if !hasReviewCompletionEvidence(s, ids) {
+			return fmt.Errorf("task_completed #%d review acceptance requires non-auxiliary evidence", n.ID)
 		}
 	default:
 		return fmt.Errorf("task_completed #%d has unknown acceptance kind %q", n.ID, n.Acceptance.Kind)
 	}
 	return nil
+}
+
+func (s *State) validateContestEvidenceEvent(e *Event) error {
+	return validateContestEvidence(s, e)
+}
+
+func (s *State) completionRunSetEvidence(nodeID int64, ids []string) (EvidenceRecord, bool) {
+	var out EvidenceRecord
+	for _, evidenceID := range ids {
+		rec := s.EvidenceIDs[evidenceID]
+		if rec.Kind != EvidenceAcceptanceRunSet {
+			continue
+		}
+		if out.EventID != "" {
+			return out, false
+		}
+		out = rec
+	}
+	return out, out.EventID != ""
+}
+
+func (s *State) legacyVerifyCompletionScriptEvidence(n *Node, e *Event, ids []string) bool {
+	// COMPAT: stores written before acceptance_run_set used task_completed.evidence_id
+	// to point at the final acceptance script_run. Readers accept that append-only
+	// shape only when it proves one successful declared check in the same attempt;
+	// current writers still require acceptance_run_set.
+	if e.EvidenceID == "" || len(ids) != 1 || ids[0] != e.EvidenceID {
+		return false
+	}
+	rec, ok := s.EvidenceIDs[e.EvidenceID]
+	if !ok || rec.Kind != EvidenceScript || rec.NodeID != n.ID {
+		return false
+	}
+	if e.AttemptID != "" && rec.AttemptID != e.AttemptID {
+		return false
+	}
+	for _, run := range n.Runs {
+		if run.EventID != rec.EventID {
+			continue
+		}
+		if e.AttemptID != "" && run.AttemptID != e.AttemptID {
+			return false
+		}
+		for _, check := range n.Acceptance.VerifyChecks() {
+			if scriptRunSatisfiesVerifyCheck(run, check) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func hasReviewCompletionEvidence(s *State, ids []string) bool {
+	for _, evidenceID := range ids {
+		rec := s.EvidenceIDs[evidenceID]
+		switch rec.Kind {
+		case EvidenceCommit, EvidenceContextDrift, EvidenceAcceptanceRunSet:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec EvidenceRecord) error {
@@ -753,6 +840,13 @@ func (s *State) validateAcceptanceRunSetCompletion(n *Node, complete *Event, rec
 		}
 	}
 	return nil
+}
+
+func scriptRunSatisfiesVerifyCheck(run ScriptRunRecord, check VerifyCheck) bool {
+	return run.Trigger == TriggerAcceptance &&
+		run.ExitCode == 0 &&
+		run.Cmd == check.Cmd &&
+		normalizedCheckName(run.CheckName) == check.Name
 }
 
 func (s *State) validateAcceptance(nodeID int64, g *Acceptance) error {

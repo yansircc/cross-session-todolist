@@ -74,6 +74,123 @@ func TestStoreExecSeparation(t *testing.T) {
 	}
 }
 
+func TestWorkerStoreBindingUsesGitMetadata(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfacePrivate},
+		AcceptanceVerify: "true",
+	})
+
+	if _, err := os.Stat(filepath.Join(worker, StoreDirName, workerBindingFallbackFile)); !os.IsNotExist(err) {
+		t.Fatalf("git worker binding should not live in worktree .cst, stat err=%v", err)
+	}
+	binding, ok, err := DetectWorkerStoreBinding(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected worker store binding")
+	}
+	if binding.StoreRoot != central || binding.ExecCWD != worker || binding.ExecSurface != ExecSurfacePrivate {
+		t.Fatalf("bad binding: %+v", binding)
+	}
+	recovery := WorkerRecoveryCommand("take", []string{"2"}, binding)
+	if !strings.Contains(recovery, "--store "+central) ||
+		!strings.Contains(recovery, "--exec-cwd "+worker) ||
+		!strings.Contains(recovery, "--private-exec-cwd") {
+		t.Fatalf("recovery command lost binding: %s", recovery)
+	}
+	cmd := exec.Command("git", "-C", worker, "status", "--short")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("worker binding must not pollute git status:\n%s", out)
+	}
+}
+
+func TestWorkerCheckoutRejectsImplicitMutatingStore(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: worker, ExecSurface: ExecSurfacePrivate},
+		AcceptanceVerify: "true",
+	})
+
+	if err := SetStoreRoot(""); err != nil {
+		t.Fatal(err)
+	}
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(worker); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	err = DoTake(io.Discard, 2, false)
+	if err == nil || !strings.Contains(err.Error(), "mutating commands require explicit --store") {
+		t.Fatalf("expected worker store guard, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worker, StoreDirName, eventsFile)); !os.IsNotExist(err) {
+		t.Fatalf("implicit worker mutation wrote local events, stat err=%v", err)
+	}
+
+	if err := SetStoreRoot(central); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	task := replayState(t).Nodes[2]
+	if task.Claim == nil || task.Claim.Actor != "alice" {
+		t.Fatalf("explicit central store did not receive claim: %+v", task.Claim)
+	}
+	if _, err := os.Stat(filepath.Join(worker, StoreDirName, eventsFile)); !os.IsNotExist(err) {
+		t.Fatalf("explicit central mutation wrote worker events, stat err=%v", err)
+	}
+}
+
+func TestExecCWDInsideStoreRootDoesNotCreateWorkerBinding(t *testing.T) {
+	central := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, central)
+	subdir := filepath.Join(central, "pkg")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: subdir, ExecSurface: ExecSurfaceShared},
+		AcceptanceVerify: "true",
+	})
+
+	if binding, ok, err := DetectWorkerStoreBinding(central); err != nil || ok {
+		t.Fatalf("same-checkout exec_cwd must not create worker binding, ok=%v binding=%+v err=%v", ok, binding, err)
+	}
+}
+
 func TestScriptRunIdentityAndArtifacts(t *testing.T) {
 	central := t.TempDir()
 	worker := t.TempDir()

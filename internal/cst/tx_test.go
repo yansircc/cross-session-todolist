@@ -166,7 +166,7 @@ func TestCompleteTaskRejectsCanceledRace(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		_, err := tx.CompleteTask(guard, ev.EventID)
+		_, err := tx.CompleteTask(guard, []string{ev.EventID})
 		return err
 	})
 	if err == nil {

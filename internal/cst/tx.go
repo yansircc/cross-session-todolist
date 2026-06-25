@@ -34,6 +34,11 @@ type TxOpts struct {
 // don't open-code it (and can't accidentally drift on, say, lease repair).
 // Errors from fn propaacceptance; pending events commit only on success.
 func WithStore(opts TxOpts, fn func(*Tx) error) error {
+	if opts.Mutating {
+		if err := GuardImplicitWorkerStoreMutation(""); err != nil {
+			return err
+		}
+	}
 	paths, err := CurrentStorePaths()
 	if err != nil {
 		return err
@@ -80,6 +85,9 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 	if len(tx.pending) > 0 {
 		if !opts.Mutating {
 			return errors.New("internal: read-only tx attempted to write events")
+		}
+		if err := recordWorkerStoreBindings(paths, state.StoreID(), tx.pending); err != nil {
+			return err
 		}
 		return AppendAt(paths, tx.pending...)
 	}
@@ -638,7 +646,8 @@ func (tx *Tx) RenewExecutionClaim(id int64) (*Event, error) {
 // CompleteTask is the only writer of task_completed. It re-validates the
 // guard's preconditions inside the current lock, so verify-acceptance completions
 // that race with cancel/release/lease-expiry are rejected.
-func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error) {
+func (tx *Tx) CompleteTask(g CompletionGuard, evidenceIDs []string) (*Event, error) {
+	evidenceIDs = normalizeEvidenceIDs(evidenceIDs)
 	current, err := completionGuardFromSnapshot(tx.state, g.NodeID, tx.actor)
 	if err != nil {
 		return nil, err
@@ -656,7 +665,7 @@ func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error)
 	if g.ClaimAttemptID != "" && current.ClaimAttemptID != g.ClaimAttemptID {
 		return nil, herr(ExitClaimConflict, "task #%d attempt changed under us", g.NodeID)
 	}
-	if evidenceID != "" {
+	for _, evidenceID := range evidenceIDs {
 		rec, ok := tx.state.EvidenceIDs[evidenceID]
 		if !ok {
 			return nil, herr(ExitNotFound, "evidence %s not found", evidenceID)
@@ -664,24 +673,30 @@ func (tx *Tx) CompleteTask(g CompletionGuard, evidenceID string) (*Event, error)
 		if rec.NodeID != g.NodeID {
 			return nil, herr(ExitInvariantBroken, "evidence %s belongs to #%d", evidenceID, rec.NodeID)
 		}
-		if g.AcceptanceKind == AcceptanceVerify && rec.Kind != EvidenceAcceptanceRunSet {
-			return nil, herr(ExitInvariantBroken, "verify completion requires acceptance_run_set evidence, got %s", rec.Kind)
+	}
+	if g.AcceptanceKind == AcceptanceVerify {
+		hasRunSet := false
+		for _, evidenceID := range evidenceIDs {
+			if tx.state.EvidenceIDs[evidenceID].Kind == EvidenceAcceptanceRunSet {
+				hasRunSet = true
+				break
+			}
+		}
+		if !hasRunSet {
+			return nil, herr(ExitUsage, "verify acceptance requires acceptance_run_set evidence_id")
 		}
 	}
-	if g.AcceptanceKind == AcceptanceVerify && evidenceID == "" {
-		return nil, herr(ExitUsage, "verify acceptance requires acceptance_run_set evidence_id")
-	}
-	if g.AcceptanceKind == AcceptanceReview && evidenceID == "" {
+	if g.AcceptanceKind == AcceptanceReview && len(evidenceIDs) == 0 {
 		return nil, herr(ExitUsage, "review acceptance requires --evidence <event-id> or --note")
 	}
 	ev := &Event{
-		EventID:    NewEventID(),
-		Timestamp:  tx.now,
-		Actor:      tx.actor,
-		Type:       EvTaskCompleted,
-		AttemptID:  n.Claim.AttemptID,
-		NodeID:     g.NodeID,
-		EvidenceID: evidenceID,
+		EventID:     NewEventID(),
+		Timestamp:   tx.now,
+		Actor:       tx.actor,
+		Type:        EvTaskCompleted,
+		AttemptID:   n.Claim.AttemptID,
+		NodeID:      g.NodeID,
+		EvidenceIDs: evidenceIDs,
 	}
 	if err := tx.applyAndQueue(ev); err != nil {
 		return nil, err

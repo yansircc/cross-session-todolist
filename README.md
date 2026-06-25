@@ -158,6 +158,7 @@ cst events --attempt <attempt-id>
 cst events --since <event-id>
 cst events --for <id> --attempt <attempt-id> --since <event-id>
 cst events --all --raw
+cst ui [--within <id>] [-o <path>] [--no-open] [--stdout]
 
 cst take [<task-id>] [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...]
 cst release <task-id>
@@ -171,7 +172,7 @@ cst evidence <id> --kind <kind> --summary "..." [--data JSON]
 cst evidence <id> --kind note --summary "Process note..."
 cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
 cst done <task-id> --from-acceptance <acceptance-run-set-evidence-id> [--commit <sha>]
-cst done <task-id> [--evidence <event-id> | --note "..."]
+cst done <task-id> [--evidence <event-id> ... | --note "..."]
 cst cancel <id> --reason "..."
 ```
 
@@ -204,10 +205,12 @@ cst done 2
 Verify acceptance records successful `script_run(trigger=acceptance)` events,
 then records one `evidence_recorded(kind=acceptance_run_set)` that explicitly
 maps each declared check to the script_run event that satisfied it.
-`task_completed.evidence_id` points to that run-set evidence, not to the last
+`task_completed.evidence_ids` includes that run-set evidence, not the last
 script run. Completion replays the run-set and rejects missing checks, failed
-runs, mixed execution contexts, stale acceptance digests, and manual `--note` or
-ordinary `--evidence` on verify tasks.
+runs, mixed execution contexts, stale acceptance digests, and manual `--note` on
+verify tasks. Supplemental `--evidence` ids are allowed with
+`--from-acceptance` so the completion can bind the full evidence set that
+satisfies the task obligations.
 
 Worker checkouts must separate ledger identity from execution identity. For
 cross-session completion, persist the execution envelope on the task first:
@@ -241,6 +244,14 @@ task id, claim, attempt, execution envelope, and evidence id already filled.
 `worker-run` accepts one of those action ids, recomputes the frontier at execution
 time, and refuses stale or drifted actions. The previewed `run` / `done` commands
 are informational; the wrapper is the closed loop.
+
+When a worker checkout is explicitly bound through a central store and
+`--exec-cwd`, CST records a local worker binding outside the git work surface
+when possible. In that detectable worker checkout, mutating commands without
+explicit `--store` fail before opening a local ledger and print a recovery
+command such as `cst --store /central/repo take 12 --exec-cwd /worker/repo`.
+This guard does not guess central stores; ordinary single-checkout repos without
+a worker binding keep normal ambient-store behavior.
 
 `--review <who>` means `done` requires evidence or a note.
 
@@ -344,10 +355,23 @@ use a different evidence kind such as `review_checklist_template`;
 `review_checklist` is reserved for itemized review results.
 
 For verify acceptance, `done` records successful `script_run(trigger=acceptance)`
-events and an `acceptance_run_set` evidence, then completes with that run-set as
-the completion evidence. `cst run` records `script_run(trigger=probe)` without
+events and an `acceptance_run_set` evidence, then completes with an evidence set
+that includes that run-set. `cst run` records `script_run(trigger=probe)` without
 changing status. If a task has multiple verify checks, `cst run <id> --check
 <name>` selects one probe check.
+
+Closure evidence is split by what CST can verify:
+
+- `evidence(kind=boundary)` uses JSON `{"includes":[...],"excludes":[...]}`.
+  At completion, CST checks these paths against the actual accepted diff:
+  claimed includes must be covered and claimed excludes must not be touched.
+- `evidence(kind=rationale)` records non-vacuous structured attestation:
+  `invariant`, `failure`, `minimal_fix`, `remaining_risk`, and optional
+  `not_doing`. CST validates shape and projects it; it does not prove the
+  rationale is true.
+- `evidence(kind=contest)` targets a boundary or rationale evidence id and
+  marks it contested for later review. Review, not the reducer, resolves the
+  truth of rationale.
 
 Each `script_run` keeps bounded `stdout_head` / `stderr_head` for projections.
 Full non-empty stdout/stderr is written under `.cst/artifacts/runs/` and the
@@ -425,6 +449,7 @@ Held tasks still keep the root open. They are not completion.
 - `waiting_on`: tasks paused by incomplete `--after` prerequisites.
 - `dependency_failed`: tasks whose prerequisite was canceled.
 - `held`, `claims`, `recent_failures`, `recent_runs`, `recent_done`.
+- completed task evidence sets and closure summaries when they are present.
 - `*_meta`: total/shown/truncated metadata for bounded collections.
 
 Use `cst brief --within <id>` to focus on one child goal/workstream without
@@ -437,13 +462,18 @@ current frontier, not a full history browser.
 ## Show And Events
 
 `cst show <id>` is a bounded single-node view. It includes scalar node facts,
-aggregate progress, inherited rules, and bounded previews of children, recent
+aggregate progress, inherited rules, completed evidence ids, closure
+boundary/rationale/contest projection, and bounded previews of children, recent
 runs, and recent evidence. It is not a subtree dump.
 
 `cst worker-status <task-id>` is a bounded worker view over one task. It derives
 legal bound actions from the same admissibility predicate used by completion, and
 it records subagents only as external observations. `cst worker-run` must
 re-read this frontier before executing an action id.
+
+`cst ui` renders the same bounded frontier, completed evidence ids, closure
+summary, and contested state for browser review. It is a projection, not another
+task source.
 
 Use explicit event ranges for history:
 
