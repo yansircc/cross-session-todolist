@@ -732,7 +732,10 @@ func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJ
 	failed := firstFailedRun(results)
 	artifactErr := firstArtifactError(results)
 	if failed != nil || artifactErr != nil {
-		_ = recordScriptRunsOnly(id, results)
+		if err := recordScriptRunsOnly(id, results); err != nil {
+			emitRuns(out, asJSON, id, results)
+			return fmt.Errorf("failed to record script run facts: %w", err)
+		}
 		emitRuns(out, asJSON, id, results)
 		if artifactErr != nil {
 			return artifactErr
@@ -766,7 +769,10 @@ func runAcceptanceWithoutCompletion(out io.Writer, id int64, execCWD string, asJ
 	})
 	if err != nil {
 		if isHandlerErr(err) {
-			_ = recordScriptRunsOnly(id, results)
+			if recordErr := recordScriptRunsOnly(id, results); recordErr != nil {
+				emitRuns(out, asJSON, id, results)
+				return fmt.Errorf("%w; failed to record script run facts: %v", err, recordErr)
+			}
 		}
 		emitRuns(out, asJSON, id, results)
 		return err
@@ -913,7 +919,10 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 	// Phase 3: under a fresh tx, always record the runs, complete only if
 	// acceptance passed AND guard preconditions still hold.
 	if failed != nil || artifactErr != nil {
-		_ = recordScriptRunsOnly(id, results)
+		if err := recordScriptRunsOnly(id, results); err != nil {
+			emitRuns(out, asJSON, id, results)
+			return fmt.Errorf("failed to record script run facts: %w", err)
+		}
 		emitRuns(out, asJSON, id, results)
 		if artifactErr != nil {
 			return artifactErr
@@ -968,7 +977,10 @@ func DoDone(out io.Writer, id int64, args DoneArgs, asJSON bool) error {
 		// all-or-nothing on success. Preserve the command facts if completion
 		// races with cancel/release/lease-expiry after the shell work finished.
 		if isHandlerErr(err) {
-			_ = recordScriptRunsOnly(id, results)
+			if recordErr := recordScriptRunsOnly(id, results); recordErr != nil {
+				emitRuns(out, asJSON, id, results)
+				return fmt.Errorf("%w; failed to record script run facts: %v", err, recordErr)
+			}
 		}
 		emitRuns(out, asJSON, id, results)
 		return err

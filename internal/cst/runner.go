@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -196,10 +197,18 @@ func Run(opts RunOpts) RunResult {
 	res.StderrHead, _ = stderrBuf.Head()
 	res.Truncated = stdoutBuf.Truncated() || stderrBuf.Truncated()
 	if opts.ArtifactDir != "" {
-		res.StdoutArtifact, res.ArtifactError = writeRunArtifact(opts.ArtifactDir, eventID, "stdout", stdoutFull.Bytes())
-		if res.ArtifactError == nil {
-			res.StderrArtifact, res.ArtifactError = writeRunArtifact(opts.ArtifactDir, eventID, "stderr", stderrFull.Bytes())
+		stdoutArtifact, err := writeRunArtifact(opts.ArtifactDir, eventID, "stdout", stdoutFull.Bytes())
+		if err != nil {
+			res.ArtifactError = err
+			return res
 		}
+		stderrArtifact, err := writeRunArtifact(opts.ArtifactDir, eventID, "stderr", stderrFull.Bytes())
+		if err != nil {
+			res.ArtifactError = err
+			return res
+		}
+		res.StdoutArtifact = stdoutArtifact
+		res.StderrArtifact = stderrArtifact
 	}
 	return res
 }
@@ -234,19 +243,48 @@ func writeRunArtifact(dir string, eventID string, suffix string, data []byte) (*
 	if len(data) == 0 {
 		return nil, nil
 	}
+	if !safeArtifactNamePart(eventID) {
+		return nil, errors.New("artifact event_id must be a single path segment")
+	}
+	if suffix != "stdout" && suffix != "stderr" {
+		return nil, errors.New("artifact suffix must be stdout or stderr")
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	name := eventID + "." + suffix
 	full := filepath.Join(dir, name)
-	if err := os.WriteFile(full, data, 0o644); err != nil {
+	if err := writeFileAtomically(full, data, 0o644); err != nil {
 		return nil, err
 	}
-	return &ArtifactRef{
+	ref := &ArtifactRef{
 		Path:     filepath.ToSlash(filepath.Join("artifacts", "runs", name)),
 		SHA256:   sha256Hex(data),
 		ByteSize: int64(len(data)),
-	}, nil
+	}
+	if err := verifyRunArtifactRef(full, ref); err != nil {
+		return nil, err
+	}
+	return ref, nil
+}
+
+func safeArtifactNamePart(part string) bool {
+	part = strings.TrimSpace(part)
+	return part != "" && part != "." && part != ".." && !strings.ContainsAny(part, `/\`)
+}
+
+func verifyRunArtifactRef(path string, ref *ArtifactRef) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != ref.ByteSize {
+		return errors.New("artifact size verification failed")
+	}
+	if sha256Hex(data) != ref.SHA256 {
+		return errors.New("artifact sha256 verification failed")
+	}
+	return nil
 }
 
 // cappedBuffer collects up to N bytes; further writes are counted but

@@ -1,6 +1,7 @@
 package cst
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,5 +55,28 @@ func TestReplayRebuildsState(t *testing.T) {
 	// Sanity: events.jsonl is the only state truth.
 	if _, err := os.Stat(filepath.Join(dir, ".cst", "events.jsonl")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAppendRejectsWholeBatchBeforeWriting(t *testing.T) {
+	withTempStore(t)
+	now := time.Now()
+	root := &Event{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+		NodeID: 1, Kind: KindGoal, Intent: "root"}
+	if err := Append(root); err != nil {
+		t.Fatal(err)
+	}
+
+	good := &Event{EventID: "good", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+		NodeID: 2, ParentID: 1, Kind: KindRule, RuleText: "must not partially commit"}
+	bad := &Event{EventID: "bad", Timestamp: now, Actor: "a", Type: EvEvidence,
+		NodeID: 1, EvidenceKind: EvidenceNote, EvidenceSummary: "bad", EvidenceData: json.RawMessage(`{`)}
+	if err := Append(good, bad); err == nil {
+		t.Fatal("expected invalid batch to fail")
+	}
+
+	events := replayEvents(t)
+	if len(events) != 1 || events[0].EventID != "root" {
+		t.Fatalf("append partially committed batch: %+v", events)
 	}
 }

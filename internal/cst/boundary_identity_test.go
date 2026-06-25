@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -102,6 +103,9 @@ func TestWorkerStoreBindingUsesGitMetadata(t *testing.T) {
 	if binding.StoreRoot != central || binding.ExecCWD != worker || binding.ExecSurface != ExecSurfacePrivate {
 		t.Fatalf("bad binding: %+v", binding)
 	}
+	if binding.StoreID != replayState(t).StoreID() {
+		t.Fatalf("binding store_id=%q want %q", binding.StoreID, replayState(t).StoreID())
+	}
 	recovery := WorkerRecoveryCommand("take", []string{"2"}, binding)
 	if !strings.Contains(recovery, "--store "+central) ||
 		!strings.Contains(recovery, "--exec-cwd "+worker) ||
@@ -115,6 +119,43 @@ func TestWorkerStoreBindingUsesGitMetadata(t *testing.T) {
 	}
 	if strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("worker binding must not pollute git status:\n%s", out)
+	}
+}
+
+func TestWorkerStoreBindingRejectsStoreIDMismatch(t *testing.T) {
+	central := t.TempDir()
+	worker := t.TempDir()
+	withExplicitStore(t, central)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, worker)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+
+	path, err := workerBindingWritePath(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(WorkerStoreBinding{
+		StoreRoot:   central,
+		StoreID:     "wrong-store",
+		ExecCWD:     worker,
+		ExecSurface: ExecSurfacePrivate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binding, ok, err := DetectWorkerStoreBinding(worker)
+	if err == nil || !strings.Contains(err.Error(), "store_id") {
+		t.Fatalf("expected store_id validation error, ok=%v binding=%+v err=%v", ok, binding, err)
+	}
+	if ok {
+		t.Fatalf("mismatched sidecar must not be accepted: %+v", binding)
 	}
 }
 
@@ -590,5 +631,32 @@ func TestAcceptanceRunSetJSONShape(t *testing.T) {
 	}
 	if _, err := parseAcceptanceRunSetData(raw); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFailedAcceptanceRunRecordErrorIsReturned(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "task",
+		Envelope:         &ExecutionEnvelope{ExecCWD: dir},
+		AcceptanceVerify: "rm .cst/events.jsonl && mkdir .cst/events.jsonl && exit 7",
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := DoRunWithArgs(io.Discard, 2, RunArgs{Acceptance: true}, false)
+	if err == nil {
+		t.Fatal("expected record failure")
+	}
+	var handlerErr *HandlerError
+	if errors.As(err, &handlerErr) && handlerErr.Code == ExitAcceptanceFail {
+		t.Fatalf("run fact record failure was hidden behind acceptance failure: %v", err)
+	}
+	if !strings.Contains(err.Error(), eventsFile) {
+		t.Fatalf("expected events log record error, got %v", err)
 	}
 }

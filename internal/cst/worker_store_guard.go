@@ -168,14 +168,21 @@ func readWorkerBinding(path string) (WorkerStoreBinding, bool, error) {
 	if err := normalizeWorkerBinding(&binding); err != nil {
 		return WorkerStoreBinding{}, false, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := validateWorkerBindingStore(binding); err != nil {
+		return WorkerStoreBinding{}, false, fmt.Errorf("%s: %w", path, err)
+	}
 	return binding, true, nil
 }
 
 func normalizeWorkerBinding(binding *WorkerStoreBinding) error {
 	binding.StoreRoot = strings.TrimSpace(binding.StoreRoot)
+	binding.StoreID = strings.TrimSpace(binding.StoreID)
 	binding.ExecCWD = strings.TrimSpace(binding.ExecCWD)
 	if binding.StoreRoot == "" {
 		return fmt.Errorf("store_root is required")
+	}
+	if binding.StoreID == "" {
+		return fmt.Errorf("store_id is required")
 	}
 	if binding.ExecCWD == "" {
 		return fmt.Errorf("exec_cwd is required")
@@ -195,6 +202,25 @@ func normalizeWorkerBinding(binding *WorkerStoreBinding) error {
 		return fmt.Errorf("exec_surface must be %s or %s", ExecSurfaceShared, ExecSurfacePrivate)
 	}
 	binding.OwnedPaths = normalizeOwnedPaths(binding.OwnedPaths)
+	return nil
+}
+
+func validateWorkerBindingStore(binding WorkerStoreBinding) error {
+	paths, err := ResolveStorePaths(binding.StoreRoot)
+	if err != nil {
+		return err
+	}
+	events, err := ReplayAt(paths)
+	if err != nil {
+		return err
+	}
+	state, err := Apply(events)
+	if err != nil {
+		return err
+	}
+	if got := state.StoreID(); got != binding.StoreID {
+		return fmt.Errorf("store_id %q does not match ledger root %q", binding.StoreID, got)
+	}
 	return nil
 }
 

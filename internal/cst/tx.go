@@ -86,10 +86,10 @@ func WithStore(opts TxOpts, fn func(*Tx) error) error {
 		if !opts.Mutating {
 			return errors.New("internal: read-only tx attempted to write events")
 		}
-		if err := recordWorkerStoreBindings(paths, state.StoreID(), tx.pending); err != nil {
+		if err := AppendAt(paths, tx.pending...); err != nil {
 			return err
 		}
-		return AppendAt(paths, tx.pending...)
+		return recordWorkerStoreBindings(paths, tx.state.StoreID(), tx.pending)
 	}
 	return nil
 }

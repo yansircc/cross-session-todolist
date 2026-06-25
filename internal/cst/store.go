@@ -191,21 +191,82 @@ func AppendAt(paths StorePaths, events ...*Event) error {
 	if _, err := EnsureStoreDirAt(paths); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(paths.EventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	batch, err := marshalEventBatch(events)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	var existing []byte
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(paths.EventsPath); err == nil {
+		mode = info.Mode().Perm()
+	}
+	existing, err = os.ReadFile(paths.EventsPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	data := make([]byte, 0, len(existing)+len(batch))
+	data = append(data, existing...)
+	data = append(data, batch...)
+	return writeFileAtomically(paths.EventsPath, data, mode)
+}
+
+func marshalEventBatch(events []*Event) ([]byte, error) {
+	var batch []byte
 	for _, e := range events {
 		line, err := e.MarshalLine()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := f.Write(line); err != nil {
-			return err
-		}
+		batch = append(batch, line...)
 	}
-	return f.Sync()
+	return batch, nil
+}
+
+func writeFileAtomically(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return syncDir(dir)
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // Replay streams every event in append order. Empty file returns no events
