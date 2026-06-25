@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 tmp="$(mktemp -d)"
@@ -19,6 +19,11 @@ mkdir -p "$central/nested/path"
   --exec-cwd "$worker" \
   --check side-effect="printf worker | tee side-effect.txt" \
   --check real="test -f side-effect.txt" >/dev/null
+(cd "$worker" && "$bin" show 1 >/dev/null)
+if (cd "$worker" && "$bin" take 2) >/dev/null 2>&1; then
+  echo "expected worker checkout mutating command without --store to fail" >&2
+  exit 1
+fi
 "$bin" --store "$central" take 2 >/dev/null
 
 runset_json="$tmp/runset.json"

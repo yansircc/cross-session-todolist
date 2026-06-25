@@ -136,9 +136,10 @@ Evidence and scripts:
     cst --store /central/repo revise 12 --exec-cwd /worker/repo --private-exec-cwd --scope internal/parser
     cst --store /central/repo worker-status 12 --human
     cst --store /central/repo worker-run 12 --action <action-id>
-  Without --store, CST walks up to the nearest existing .cst; if none exists,
-  it uses the enclosing git root before falling back to cwd. This is ambient
-  discovery, not an explicit store binding.
+  Without --store, CST walks up to the nearest initialized CST store
+  (.cst/events.jsonl or .cst/config.toml); if none exists, it uses the
+  enclosing git root before falling back to cwd. This is ambient discovery, not
+  an explicit store binding.
   --exec-cwd on add/revise becomes the task default. --exec-cwd on run/done is
   a one-command override. Private exec surfaces reject any final context drift.
   Shared surfaces reject scoped drift but record context_drift evidence and
@@ -148,7 +149,7 @@ Evidence and scripts:
   Detectable worker checkouts reject mutating commands without explicit --store
   before opening a local ledger and print the bound recovery command. Worker
   binding sidecars are accepted only when their store_id matches the replayed
-  central ledger root.
+  central ledger root; read projections use that central store.
   cst evidence records structured evidence; --data must be JSON.
   boundary evidence has {"includes":[],"excludes":[]} and is checked against the
   accepted diff. rationale evidence is structured attestation, projected and
@@ -235,14 +236,20 @@ func main() {
 		return
 	}
 	args = args[1:]
-	if storeRoot == "" && commandMutates(cmd) {
+	if storeRoot == "" {
 		if binding, ok, err := cst.DetectWorkerStoreBinding(""); err != nil {
 			fmt.Fprintln(os.Stderr, "cst:", err)
 			os.Exit(int(cst.ExitGenericError))
 		} else if ok {
-			recovery := cst.WorkerRecoveryCommand(cmd, args, binding)
-			fmt.Fprintln(os.Stderr, "cst:", cst.WorkerStoreGuardError(binding, recovery))
-			os.Exit(int(cst.ExitInvariantBroken))
+			if commandMutates(cmd) {
+				recovery := cst.WorkerRecoveryCommand(cmd, args, binding)
+				fmt.Fprintln(os.Stderr, "cst:", cst.WorkerStoreGuardError(binding, recovery))
+				os.Exit(int(cst.ExitInvariantBroken))
+			}
+			if err := cst.SetImplicitStoreRoot(binding.StoreRoot); err != nil {
+				fmt.Fprintln(os.Stderr, "cst:", err)
+				os.Exit(int(cst.ExitGenericError))
+			}
 		}
 	}
 

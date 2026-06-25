@@ -31,6 +31,14 @@ var actorMu sync.RWMutex
 var configuredActor string
 
 func SetStoreRoot(root string) error {
+	return setStoreRoot(root, true)
+}
+
+func SetImplicitStoreRoot(root string) error {
+	return setStoreRoot(root, false)
+}
+
+func setStoreRoot(root string, explicit bool) error {
 	if root == "" {
 		storeRootMu.Lock()
 		configuredStoreRoot = ""
@@ -44,7 +52,7 @@ func SetStoreRoot(root string) error {
 	}
 	storeRootMu.Lock()
 	configuredStoreRoot = paths.Root
-	configuredStoreRootExplicit = true
+	configuredStoreRootExplicit = explicit
 	storeRootMu.Unlock()
 	return nil
 }
@@ -81,13 +89,36 @@ func DefaultStoreRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if root, ok := nearestAncestorWithEntry(cwd, StoreDirName); ok {
+	if root, ok := nearestInitializedStoreRoot(cwd); ok {
 		return root, nil
 	}
 	if root, ok := nearestAncestorWithEntry(cwd, ".git"); ok {
 		return root, nil
 	}
 	return cwd, nil
+}
+
+func nearestInitializedStoreRoot(start string) (string, bool) {
+	abs, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		storeDir := filepath.Join(dir, StoreDirName)
+		if hasStoreFile(storeDir, eventsFile) || hasStoreFile(storeDir, "config.toml") {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return "", false
+}
+
+func hasStoreFile(storeDir string, name string) bool {
+	info, err := os.Stat(filepath.Join(storeDir, name))
+	return err == nil && !info.IsDir()
 }
 
 func nearestAncestorWithEntry(start string, name string) (string, bool) {

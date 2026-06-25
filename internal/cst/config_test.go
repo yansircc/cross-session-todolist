@@ -44,6 +44,9 @@ func TestDefaultStoreRootUsesExistingAncestorStore(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, StoreDirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, StoreDirName, "config.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	nested := filepath.Join(root, "a", "b")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
@@ -94,6 +97,40 @@ func TestDefaultStoreRootUsesGitRootBeforeCWD(t *testing.T) {
 	}
 	if !sameExistingPath(t, paths.Root, root) {
 		t.Fatalf("default store root=%q want git root %q", paths.Root, root)
+	}
+}
+
+func TestDefaultStoreRootIgnoresSidecarOnlyCSTCache(t *testing.T) {
+	if err := SetStoreRoot(""); err != nil {
+		t.Fatal(err)
+	}
+	worker := t.TempDir()
+	sidecarDir := filepath.Join(worker, StoreDirName)
+	if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sidecarDir, workerBindingFallbackFile), []byte(`{"store_root":"/tmp/store","store_id":"root","exec_cwd":"/tmp/worker"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(worker, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	paths, err := CurrentStorePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameExistingPath(t, paths.Root, nested) {
+		t.Fatalf("sidecar-only .cst must not become ambient store root: got %q want %q", paths.Root, nested)
 	}
 }
 

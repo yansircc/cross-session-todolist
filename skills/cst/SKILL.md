@@ -64,9 +64,10 @@ returns `phase=no-op` and no claims remain.
 Do not let process cwd imply identity across a session or worker boundary.
 
 - `--store <repo-root>` selects the central CST ledger owner.
-- Without `--store`, CST walks up to the nearest existing `.cst`; if none
-  exists, it uses the enclosing git root before falling back to cwd. This is
-  ambient discovery, not an explicit store binding.
+- Without `--store`, CST walks up to the nearest initialized CST store
+  (`.cst/events.jsonl` or `.cst/config.toml`); if none exists, it uses the
+  enclosing git root before falling back to cwd. This is ambient discovery, not
+  an explicit store binding.
 - `--exec-cwd <checkout-root>` on `add` / `revise` sets the task execution
   envelope; on `run` / `done` it is only a one-command override.
 - `--private-exec-cwd` marks the checkout as actor-private. Without it the
@@ -83,9 +84,10 @@ Do not let process cwd imply identity across a session or worker boundary.
   durable identity.
 - Detectable worker checkouts reject mutating commands without explicit
   `--store` before opening a local ledger. Worker binding sidecars are accepted
-  only when their `store_id` matches the replayed central ledger root. Use the
-  printed recovery command; do not rerun from worker cwd with ambient store
-  identity.
+  only when their `store_id` matches the replayed central ledger root. Read
+  projections use that central store; mutating commands print the recovery
+  command and fail closed. Do not rerun mutations from worker cwd with ambient
+  store identity.
 
 Worker acceptance flow:
 
