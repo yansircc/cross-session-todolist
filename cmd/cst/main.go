@@ -36,6 +36,7 @@ Start from an empty repo:
   cst add --parent 2 --intent "Publish after tests" --after 3 --review self
 
 Command surface:
+  cst next
   cst add  --intent "Root goal"
   cst add  --parent <id> --goal --intent "Child goal / workstream"
   cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]
@@ -70,21 +71,16 @@ Command surface:
   cst cancel <id> --reason "..."
 
 Agent loop:
-  1. cst brief
-  2. For a workstream, use cst brief --within <goal-or-task-id>.
-  3. If claims exist, cst show <id>; continue, release, hold, done, or cancel.
-  4. If no claim exists, cst take or cst take <ready-task-id>.
-  5. Do the work.
-  6. Optional probe: cst run <id> [--cmd "..."].
-  7. Finish: cst done <id> for verify acceptance; in worker mode use
-     cst worker-status <id> then cst worker-run <id> --action <action-id>;
-     use cst done <id> --note "..." or repeatable cst done <id> --evidence <event-id>
-     for review acceptance,
-     cst hold <id> --kind blocked|waiting|deferred --reason "...", or
-     cst cancel <id> --reason "...".
-  8. Stop only when cst brief shows root.status=completed and claims=[].
+  Run cst next, then execute the returned action or repair contract. If next
+  returns required=input, ask for the named input and rerun cst next after
+  recording it. Stop only when cst next returns phase=no-op.
 
 Read semantics:
+  cst next is the repo-level procedure projection. It is read-only: no procedure
+  state is stored. It returns a phase, a single recommended bound action when
+  one is legal, or a minimal repair contract with copyable command templates.
+  Its reconcile phase checks uncommitted paths against node.boundary only;
+  execution scope is not task ownership.
   cst brief is the bounded work projection. By default it is frontier-first:
   active child subtrees are expanded and completed child subtrees are counted.
   Use cst brief --history to inspect completed child subtrees and historical
@@ -241,6 +237,8 @@ func main() {
 	switch cmd {
 	case "add":
 		err = runAdd(args, asJSON)
+	case "next":
+		err = runNext(args, asJSON)
 	case "revise":
 		err = runRevise(args, asJSON)
 	case "take":
@@ -287,6 +285,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "cst:", err)
 		os.Exit(int(cst.ExitGenericError))
 	}
+}
+
+func runNext(args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("next", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var err error
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("next takes only flags")
+	}
+	return cst.DoNext(os.Stdout, asJSON)
 }
 
 func commandMutates(cmd string) bool {

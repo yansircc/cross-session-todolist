@@ -134,26 +134,38 @@ goal open. This proves set coverage, not human understanding.
 
 ## Agent Loop
 
-Every agent turn should begin with:
+The consumer policy is intentionally one sentence:
 
 ```sh
-cst brief
+cst next
 ```
+
+`next` is a read-only projection over the current ledger and worktree. It
+returns one of:
+
+- `action`: a bound legal action such as take, run acceptance, or complete from
+  an acceptance run set;
+- `repair`: a minimal command template for init, reconcile, boundary, or
+  obligation repair;
+- `required=input`: ask for the named input, record it, and rerun `cst next`;
+- `phase=no-op`: the root is complete and no work remains.
 
 Then follow this loop:
 
 ```sh
-cst take                 # claim the next ready task
-cst show <task-id>       # inspect root-to-node briefing and local contract
-cst run <task-id>        # optional probe; records script_run(trigger=probe)
-cst done <task-id>       # verify acceptance runs its command and records evidence
+cst next                 # project the only legal next procedure step
+cst worker-run <id> --action <action-id>
+# or execute the returned repair command template, fill required input, then rerun cst next
 ```
 
-`take`, `show`, `worker-status`, and `ui` all project the same developer
-briefing: root-to-node context fold, local boundary, direct upstream/downstream
-edges, acceptance obligation claims, success coverage, and partition warnings.
-This makes global context visible before implementation; it does not prove the
-developer understood it.
+`next`, `take`, `show`, `worker-status`, and `ui` all project the same developer
+briefing when a task is selected: root-to-node context fold, local boundary,
+direct upstream/downstream edges, acceptance obligation claims, success coverage,
+and partition warnings. This makes global context visible before implementation;
+it does not prove the developer understood it.
+
+`next` reconcile uses `node.boundary` only. `execution.scope` / `OwnedPaths` is
+execution identity and drift detection; it is not task-tree ownership.
 
 If a task cannot continue now:
 
@@ -187,6 +199,7 @@ empty.
 ## Command Surface
 
 ```sh
+cst next
 cst add  --intent "Root goal"
 cst add  --parent <id> --goal --intent "Child goal / workstream"
 cst add  --parent <id> --intent "Task" (--verify "cmd" | --check <name=cmd>... | --review "who") [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...] [--after <node-id> ...]

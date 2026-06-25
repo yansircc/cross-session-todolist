@@ -19,25 +19,13 @@ project them.
 ## First Commands
 
 ```sh
-cst brief
+cst next
 ```
 
-`cst brief` is frontier-first by default: it expands active child subtrees and
-summarizes completed child subtrees. Use `cst brief --history` only when you
-need completed child subtrees or historical recent runs/failures.
-
-If claims exist, inspect them:
-
-```sh
-cst claims
-cst show <task-id>
-```
-
-If no claim exists, take a ready task:
-
-```sh
-cst take
-```
+`cst next` is the repo-level procedure projection. It is read-only and returns a
+phase plus either one bound legal action, one minimal repair contract, required
+input, or `phase=no-op`. The consumer policy is: run `cst next`, execute its
+returned action or repair command template, then rerun `cst next`.
 
 For a worker checkout, bind the execution envelope and claim atomically:
 
@@ -47,10 +35,19 @@ cst --store /central/repo take 12 --exec-cwd /worker/repo --private-exec-cwd --s
 
 ## Work Loop
 
-1. `cst brief`
-2. `cst show <claimed-task-id>`
-3. Do the repo work.
-4. Optional probe:
+1. `cst next`
+2. If `action` is present, execute the returned bound action. Worker actions use:
+
+   ```sh
+   cst worker-run <task-id> --action <action-id>
+   ```
+
+3. If `repair` is present, fill only the required placeholders in the returned
+   command template, execute it, then rerun `cst next`.
+4. If `required=input`, ask for the named input, record it in CST, then rerun
+   `cst next`.
+5. If `phase=no-op`, confirm no claims remain and stop.
+6. During implementation, optional probes still use:
 
    ```sh
    cst run <task-id>
@@ -58,18 +55,9 @@ cst --store /central/repo take 12 --exec-cwd /worker/repo --private-exec-cwd --s
    cst run <task-id> --cmd "custom probe"
    ```
 
-5. Finish according to acceptance:
-
-   ```sh
-   cst done <task-id>
-   cst done <task-id> --note "reviewed locally"
-   cst done <task-id> --evidence <event-id> --evidence <event-id>
-   cst hold <task-id> --kind blocked --reason "..."
-   cst release <task-id>
-   cst cancel <task-id> --reason "..."
-   ```
-
-Stop only when `cst brief` reports the root as `completed` and no claims remain.
+Use `cst brief`, `cst show <task-id>`, and `cst claims` as diagnostic
+projections. They are not the primary procedure loop. Stop only when `cst next`
+returns `phase=no-op` and no claims remain.
 
 ## Boundary Identity
 
@@ -117,8 +105,9 @@ change to one actor.
 ids. The previewed `run --acceptance` / `done --from-acceptance` commands are
 informational; the action id is the executable worker handoff.
 
-`brief`, `show`, and `ui` project completed evidence ids, closure summaries, and
-contested state. Use those bounded projections before reading raw events.
+`next` reuses the same bound action generator at repo level. `brief`, `show`,
+and `ui` project completed evidence ids, closure summaries, and contested state.
+Use those bounded projections before reading raw events.
 
 ## Modeling
 
@@ -179,10 +168,15 @@ Correct tree shape with `revise`; do not create duplicate replacement tasks when
 identity should be preserved.
 
 Before implementation, use `cst show`, `cst take`, `cst worker-status`, or
-`cst ui` to read the developer briefing. The briefing includes root-to-node
+`cst ui` to read the developer briefing. `cst next` also includes the briefing
+when it selects a task. The briefing includes root-to-node
 context fold, local boundary, upstream/downstream edges, local acceptance,
 obligation claims, success coverage, and partition warnings. This projection
 makes global context recoverable; it does not prove the agent understood prose.
+
+`cst next` reconcile uses node `boundary.owned` as task-tree ownership.
+`execution.scope` / `OwnedPaths` is only execution identity and drift detection;
+do not use it to decide whether a diff belongs to a task.
 
 ## Verifier Contracts
 
