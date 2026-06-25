@@ -66,7 +66,6 @@ type taskRowView struct {
 	Acceptance  string
 	WaitingOn   []int64
 	BlockedBy   []int64
-	Commands    []string
 	LatestRun   *ScriptRunRecord
 	Evidence    *EvidenceRecord
 	Closure     *ClosureProjection
@@ -214,7 +213,6 @@ func buildTaskRow(s *State, n *Node) taskRowView {
 		Acceptance: taskAcceptanceSummary(n),
 		WaitingOn:  s.WaitingOnIDs(n),
 		BlockedBy:  s.DependencyFailedIDs(n),
-		Commands:   taskCommands(n),
 		Evidence:   latestHumanEvidence(n),
 		Closure:    closureProjection(n),
 	}
@@ -296,17 +294,6 @@ func taskAcceptanceSummary(n *Node) string {
 	}
 }
 
-func taskCommands(n *Node) []string {
-	cmds := []string{fmt.Sprintf("cst show %d", n.ID)}
-	if n.Claim != nil {
-		cmds = append(cmds, fmt.Sprintf("cst worker-status %d --human", n.ID))
-	}
-	if attemptID := taskAttemptID(n); attemptID != "" {
-		cmds = append(cmds, fmt.Sprintf("cst events --attempt %s", attemptID))
-	}
-	return cmds
-}
-
 func latestRun(n *Node) *ScriptRunRecord {
 	if len(n.Runs) == 0 {
 		return nil
@@ -321,6 +308,10 @@ func latestHumanEvidence(n *Node) *EvidenceRecord {
 		}
 	}
 	return nil
+}
+
+func isHumanEvidenceKind(kind string) bool {
+	return kind != EvidenceScript && kind != EvidenceAcceptanceRunSet
 }
 
 func ancestorGoals(s *State, nodeID int64) []*Node {

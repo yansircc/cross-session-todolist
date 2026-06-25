@@ -20,20 +20,21 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 
 	wantSubstrings := []string{
 		`<!doctype html>`,
-		`CST Progress`,
+		`CST Next Briefing`,
 		`id="phase-2"`,
-		`Stage Completion`,
-		`Progress Equation`,
-		`Inherited Rules`,
+		`class="steps"`,
+		`type="radio" name="phase-2-task"`,
+		`#phase-2-task-6:checked ~ .phase-head label`,
 		`rules of the phase`,
-		`<th>Task</th><th>State</th><th>Acceptance</th><th>Human Value</th>`,
 		`Pending task`,
 		`Finished task`,
 		`Stuck task`,
-		`<span class="badge done">completed</span>`,
-		`<span class="badge held">held</span>`,
-		`waiting: block reason text`,
-		`latest evidence: note · did the thing`,
+		`block reason text`,
+		`did the thing`,
+		`checks <span class="count">1</span>`,
+		`evidence <span class="count">1</span>`,
+		`rules <span class="count">1</span>`,
+		`edges <span class="count">0</span>`,
 		`<style>`,
 	}
 	for _, want := range wantSubstrings {
@@ -43,6 +44,11 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 	}
 	if strings.Contains(html, "<script") {
 		t.Errorf("html contains unexpected <script> tag")
+	}
+	for _, unwanted := range []string{`<aside`, `<table`, `Recent Evidence`, `Progress Equation`, `worker-status`, `cst events --attempt`, `cmd-pill`} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("html contains removed dashboard surface %q\n--- generated ---\n%s", unwanted, head(html, 3000))
+		}
 	}
 }
 
@@ -73,16 +79,13 @@ func TestRenderHTML_AttemptNamedChecksAndInheritedRules(t *testing.T) {
 	html := renderHTML(v)
 
 	wantSubstrings := []string{
-		`Recent Evidence`,
-		`#4 failure`,
-		`Inherited Rules`,
+		`CST Next Briefing`,
+		`<span class="tag active">run acceptance</span>`,
+		`#4 Checked task`,
 		`root invariant`,
-		`verify.unit`,
-		`verify.lint`,
-		`latest run: probe exit=1 check=lint · false`,
-		`cst show 4`,
-		`cst worker-status 4 --human`,
-		`cst events --attempt ` + attemptID,
+		`unit`,
+		`lint`,
+		`checks <span class="count">2</span>`,
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(html, want) {
@@ -91,6 +94,11 @@ func TestRenderHTML_AttemptNamedChecksAndInheritedRules(t *testing.T) {
 	}
 	if strings.Contains(html, "次重试") {
 		t.Errorf("named checks must not be labeled as retries")
+	}
+	for _, unwanted := range []string{`Recent Evidence`, `latest run:`, `cst show 4`, `cst worker-status`, `cst events --attempt`, attemptID} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("html leaked execution trivia %q\n--- generated ---\n%s", unwanted, head(html, 3000))
+		}
 	}
 }
 
@@ -107,20 +115,20 @@ func TestRenderHTML_AfterDependencyIsWaitingNotReady(t *testing.T) {
 	}
 	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
 	html := renderHTML(v)
-	row := htmlRowContaining(t, html, "Dependent task")
+	article := htmlArticleContaining(t, html, "Dependent task")
 
 	wantSubstrings := []string{
-		`<span class="badge waiting">waiting</span>`,
 		`after=3`,
-		`Shows the prerequisite that must complete first.`,
+		`edges <span class="count">1</span>`,
+		`<span>from</span><span>3</span>`,
 	}
 	for _, want := range wantSubstrings {
-		if !strings.Contains(row, want) {
-			t.Errorf("dependent row missing %q\n--- row ---\n%s", want, row)
+		if !strings.Contains(article, want) {
+			t.Errorf("dependent article missing %q\n--- article ---\n%s", want, article)
 		}
 	}
-	if strings.Contains(row, `legal take action`) || strings.Contains(row, `badge ready`) {
-		t.Errorf("dependent row was projected as ready\n--- row ---\n%s", row)
+	if strings.Contains(article, `legal take action`) || strings.Contains(article, `ready`) {
+		t.Errorf("dependent article was projected as ready\n--- article ---\n%s", article)
 	}
 	if strings.Contains(html, "待领取") {
 		t.Errorf("html must not use raw-open ready wording")
@@ -139,13 +147,16 @@ func TestRenderHTML_ReviewReadyIsNotDoubleCountedAsReady(t *testing.T) {
 	}
 	v := uiViewFrom(state, 0, EventsPath(), "sample", 0, state.Nodes[1].LastEvent)
 	html := renderHTML(v)
-	row := htmlRowContaining(t, html, `<span class="mono">#3</span> Review task`)
+	article := htmlArticleContaining(t, html, `#3 Review task`)
 
-	if !strings.Contains(row, `<span class="badge review">review ready</span>`) {
-		t.Errorf("review row missing review-ready badge\n--- row ---\n%s", row)
+	if !strings.Contains(article, `<div class="state-line review">review ready</div>`) {
+		t.Errorf("review article missing review-ready state\n--- article ---\n%s", article)
 	}
-	if !strings.Contains(html, `<span class="badge review">1 review</span>`) {
-		t.Errorf("phase facts missing review count\n--- html ---\n%s", head(html, 3000))
+	if !strings.Contains(article, `<span class="check">review</span>`) {
+		t.Errorf("review article missing review check\n--- article ---\n%s", article)
+	}
+	if !strings.Contains(html, `<span class="tag active">review</span>`) {
+		t.Errorf("top procedure action should be review\n--- html ---\n%s", head(html, 3000))
 	}
 	if strings.Contains(html, `<span class="badge ready">1 ready</span>`) {
 		t.Errorf("review-ready task was double-counted as ready")
@@ -182,7 +193,7 @@ func TestRenderHTML_EscapesIntent(t *testing.T) {
 	// Root goal with a script tag in its intent
 	mustDoAdd(t, AddArgs{Intent: "Project <script>alert(1)</script>"})
 	// Goal + open task to ensure a scope card renders
-	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase"})
+	mustDoAdd(t, AddArgs{Parent: 1, Goal: true, Intent: "Phase <script>alert(2)</script>"})
 	mustDoAdd(t, AddArgs{Parent: 2, Intent: "Task <img onerror=x>", AcceptanceVerify: "true"})
 
 	state := replayState(t)
@@ -192,7 +203,7 @@ func TestRenderHTML_EscapesIntent(t *testing.T) {
 	if strings.Contains(html, "<script>alert(1)</script>") {
 		t.Errorf("raw <script> intent leaked into html")
 	}
-	if !strings.Contains(html, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+	if !strings.Contains(html, "&lt;script&gt;alert(2)&lt;/script&gt;") {
 		t.Errorf("expected escaped script tag in html")
 	}
 	if strings.Contains(html, "<img onerror=x>") {
@@ -412,18 +423,18 @@ func head(s string, n int) string {
 	return s[:n]
 }
 
-func htmlRowContaining(t *testing.T, html, needle string) string {
+func htmlArticleContaining(t *testing.T, html, needle string) string {
 	t.Helper()
 	idx := strings.Index(html, needle)
 	if idx < 0 {
-		t.Fatalf("html missing row needle %q\n%s", needle, head(html, 2000))
+		t.Fatalf("html missing article needle %q\n%s", needle, head(html, 2000))
 	}
-	start := strings.LastIndex(html[:idx], "<tr>")
-	endRel := strings.Index(html[idx:], "</tr>")
+	start := strings.LastIndex(html[:idx], "<article")
+	endRel := strings.Index(html[idx:], "</article>")
 	if start < 0 || endRel < 0 {
-		t.Fatalf("could not isolate row containing %q", needle)
+		t.Fatalf("could not isolate article containing %q", needle)
 	}
-	return html[start : idx+endRel+len("</tr>")]
+	return html[start : idx+endRel+len("</article>")]
 }
 
 // errorsAs is a tiny std-free errors.As to keep test deps unchanged.

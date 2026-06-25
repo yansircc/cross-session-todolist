@@ -322,7 +322,7 @@ func TestDeveloperBriefingProjectsThroughShowTakeWorkerStatusAndUI(t *testing.T)
 	}
 
 	ui := renderHTML(uiViewFrom(replayState(t), 0, EventsPath(), "sample", 0, time.Now()))
-	for _, want := range []string{"Developer Briefing", "Success obligations: api", "boundary: owned=internal/cst"} {
+	for _, want := range []string{"context <span class=\"count\"", "success obligations</span><span>api", "boundary</span><span>owned=internal/cst"} {
 		if !strings.Contains(ui, want) {
 			t.Fatalf("ui missing %q\n%s", want, head(ui, 4000))
 		}
