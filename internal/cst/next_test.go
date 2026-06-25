@@ -123,6 +123,34 @@ func TestNextDoesNotReconcileDiffCoveredByActiveNodeBoundary(t *testing.T) {
 	}
 }
 
+func TestNextReconcilesDiffCoveredOnlyByCompletedNodeBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "completed historical task",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	})
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoDone(io.Discard, 2, DoneArgs{Note: "reviewed"}, false); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "src/new.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile {
+		t.Fatalf("completed task boundary must not cover new dirty diff: %+v", view)
+	}
+	if len(view.UnreconciledDiffs) != 1 || view.UnreconciledDiffs[0].Path != "src/new.txt" {
+		t.Fatalf("wrong unreconciled diff projection: %+v", view.UnreconciledDiffs)
+	}
+}
+
 func TestNextReconcilesDirtyDiffWhenTaskHasNoBoundary(t *testing.T) {
 	dir := withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")
