@@ -15,6 +15,11 @@ const uiCSS = `
     --success:#10b981;
     --success-soft:#ecfdf5;
     --warning:#b45309;
+    --step-empty:#e5e7eb;
+    --step-done:#10b981;
+    --step-now:#2563eb;
+    --step-selected:#111111;
+    --step-hover:#374151;
     --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
     --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   }
@@ -30,6 +35,11 @@ const uiCSS = `
       --success:#34d399;
       --success-soft:#052e2b;
       --warning:#fbbf24;
+      --step-empty:#263241;
+      --step-done:#34d399;
+      --step-now:#60a5fa;
+      --step-selected:#93c5fd;
+      --step-hover:#64748b;
     }
   }
   *{box-sizing:border-box}
@@ -135,13 +145,13 @@ const uiCSS = `
     width:9px;
     height:9px;
     border-radius:2px;
-    background:#e5e7eb;
+    background:var(--step-empty);
     cursor:pointer;
     transition:background 150ms ease,transform 150ms ease;
   }
-  .step.done{background:var(--success)}
-  .step.now{background:var(--accent)}
-  .step:hover{background:var(--ink)}
+  .step.done{background:var(--step-done)}
+  .step.now{background:var(--step-now)}
+  .step:hover{background:var(--step-hover)}
   .detail{padding-top:2px}
   .panel{display:none}
   .panel h3{

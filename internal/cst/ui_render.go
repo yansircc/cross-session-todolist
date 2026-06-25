@@ -138,7 +138,7 @@ func renderTaskSelectorCSS(sb *strings.Builder, v uiView) {
 	for _, phase := range v.ActivePhases {
 		for _, row := range phase.TaskRows {
 			id := rowRadioID(phase, row)
-			fmt.Fprintf(sb, "\n#%s:checked ~ .phase-head label[for=\"%s\"]{background:var(--ink);transform:scale(1.25);}", id, id)
+			fmt.Fprintf(sb, "\n#%s:checked ~ .phase-head label[for=\"%s\"]{background:var(--step-selected);transform:scale(1.25);}", id, id)
 			fmt.Fprintf(sb, "\n#%s:checked ~ .detail .panel-for-%s{display:block;}", id, id)
 		}
 	}

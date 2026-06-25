@@ -40,6 +40,14 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 		`color-scheme:light dark`,
 		`@media (prefers-color-scheme:dark)`,
 		`--accent-soft:#172554`,
+		`--step-empty:#e5e7eb`,
+		`--step-empty:#263241`,
+		`--step-selected:#93c5fd`,
+		`background:var(--step-empty)`,
+		`background:var(--step-done)`,
+		`background:var(--step-now)`,
+		`background:var(--step-hover)`,
+		`background:var(--step-selected);transform:scale(1.25)`,
 		`background:var(--success-soft)`,
 	}
 	for _, want := range wantSubstrings {
@@ -49,6 +57,9 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 	}
 	if strings.Contains(html, "<script") {
 		t.Errorf("html contains unexpected <script> tag")
+	}
+	if strings.Contains(html, `background:var(--ink);transform:scale`) {
+		t.Errorf("selected progress step must not derive fill color from text color")
 	}
 	for _, unwanted := range []string{`<aside`, `<table`, `Recent Evidence`, `Progress Equation`, `worker-status`, `cst events --attempt`, `cmd-pill`} {
 		if strings.Contains(html, unwanted) {
