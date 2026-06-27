@@ -10,10 +10,11 @@ import (
 
 // UIArgs is the parsed flag set for `cst ui`.
 type UIArgs struct {
-	Within int64
-	Output string
-	NoOpen bool
-	Stdout bool
+	Within          int64
+	Output          string
+	NoOpen          bool
+	Stdout          bool
+	IncludeArchived bool
 }
 
 // uiMeta is the JSON metadata emitted to stdout after a successful ui render
@@ -46,7 +47,7 @@ func DoUI(out io.Writer, args UIArgs, asJSON bool) error {
 		}
 	}
 
-	meta, err := renderOnce(args.Within)
+	meta, err := renderOnce(args.Within, args.IncludeArchived)
 	if err != nil {
 		return err
 	}
@@ -98,7 +99,7 @@ type renderResult struct {
 	openTasks    int
 }
 
-func renderOnce(within int64) (renderResult, error) {
+func renderOnce(within int64, includeArchived bool) (renderResult, error) {
 	events, err := Replay()
 	if err != nil {
 		return renderResult{}, err
@@ -121,7 +122,7 @@ func renderOnce(within int64) (renderResult, error) {
 	if len(events) > 0 {
 		lastEvent = events[len(events)-1].Timestamp
 	}
-	v := uiViewFrom(state, within, paths.EventsPath, project, len(events), lastEvent)
+	v := uiViewFromWithOptions(state, within, paths.EventsPath, project, len(events), lastEvent, uiViewOptions{IncludeArchived: includeArchived})
 	return renderResult{
 		html:         renderHTML(v),
 		activeScopes: len(v.ActivePhases),

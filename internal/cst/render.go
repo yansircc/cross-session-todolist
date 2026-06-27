@@ -19,6 +19,7 @@ type BriefView struct {
 	Subtrees             []*SubtreeBrief     `json:"subtrees,omitempty"`
 	SubtreesMeta         *CollectionMeta     `json:"subtrees_meta,omitempty"`
 	CompletedSubtrees    *CollectionMeta     `json:"completed_subtrees_meta,omitempty"`
+	ArchivedSubtrees     *CollectionMeta     `json:"archived_subtrees_meta,omitempty"`
 	InheritedRules       []*RuleBrief        `json:"inherited_rules,omitempty"`
 	Ready                []*TaskBrief        `json:"ready,omitempty"`
 	ReadyMeta            *CollectionMeta     `json:"ready_meta,omitempty"`
@@ -53,9 +54,10 @@ type NodeBrief struct {
 }
 
 type RuleBrief struct {
-	ID       int64  `json:"id"`
-	ParentID int64  `json:"parent_id"`
-	Text     string `json:"text"`
+	ID         int64       `json:"id"`
+	ParentID   int64       `json:"parent_id"`
+	Text       string      `json:"text"`
+	RuleOrigin *RuleOrigin `json:"rule_origin,omitempty"`
 }
 
 type TaskBrief struct {
@@ -106,9 +108,93 @@ type ScriptRunBrief struct {
 	At        time.Time `json:"at"`
 }
 
+type ArchivePlanView struct {
+	Revision       Revision            `json:"revision"`
+	Scope          *NodeBrief          `json:"scope,omitempty"`
+	Candidates     []*ArchiveCandidate `json:"candidates,omitempty"`
+	CandidatesMeta *CollectionMeta     `json:"candidates_meta,omitempty"`
+	Actor          string              `json:"actor"`
+	GeneratedAt    time.Time           `json:"generated_at"`
+}
+
+type ArchiveCandidate struct {
+	ID       int64        `json:"id"`
+	Kind     string       `json:"kind"`
+	Intent   string       `json:"intent,omitempty"`
+	Status   string       `json:"status"`
+	Progress Progress     `json:"progress"`
+	Rules    []*RuleBrief `json:"rules,omitempty"`
+	Archived bool         `json:"archived,omitempty"`
+}
+
 type BriefOptions struct {
-	ScopeID int64
-	History bool
+	ScopeID         int64
+	History         bool
+	IncludeArchived bool
+}
+
+func BuildArchivePlan(s *State, cfg Config, actor string, scopeID int64) (ArchivePlanView, error) {
+	_ = cfg
+	view := ArchivePlanView{Actor: actor, GeneratedAt: time.Now(), Revision: s.Revision}
+	scope := s.Root()
+	if scopeID != 0 {
+		n, ok := s.Nodes[scopeID]
+		if !ok {
+			return view, fmt.Errorf("scope node #%d not found", scopeID)
+		}
+		if !n.CanParentWork() {
+			return view, fmt.Errorf("scope node #%d is %s, not a goal/task", scopeID, n.Kind)
+		}
+		scope = n
+	}
+	if scope == nil {
+		return view, nil
+	}
+	view.Scope = &NodeBrief{ID: scope.ID, Intent: scope.Intent, Status: string(s.NodeStatus(scope))}
+	for _, cid := range scope.Children {
+		c := s.Nodes[cid]
+		if c == nil || !c.CanParentWork() || c.Archived {
+			continue
+		}
+		if err := s.validateArchiveTarget(c); err != nil {
+			continue
+		}
+		candidate := &ArchiveCandidate{
+			ID:       c.ID,
+			Kind:     c.Kind,
+			Intent:   c.Intent,
+			Status:   string(s.NodeStatus(c)),
+			Progress: s.SubtreeProgress(c.ID),
+		}
+		for _, node := range s.SubtreeNodes(c.ID) {
+			if node.Kind == KindRule && !node.Canceled {
+				candidate.Rules = append(candidate.Rules, buildRuleBrief(node))
+			}
+		}
+		view.Candidates = append(view.Candidates, candidate)
+	}
+	view.CandidatesMeta = collectionMeta(len(view.Candidates), len(view.Candidates))
+	return view, nil
+}
+
+func RenderArchivePlanText(w io.Writer, v ArchivePlanView) {
+	if v.Scope == nil {
+		fmt.Fprintln(w, "(empty store — no archive candidates)")
+		return
+	}
+	fmt.Fprintf(w, "archive plan: scope #%d [%s] %s\n", v.Scope.ID, v.Scope.Status, v.Scope.Intent)
+	if len(v.Candidates) == 0 {
+		fmt.Fprintln(w, "candidates: (none)")
+		return
+	}
+	fmt.Fprintf(w, "candidates:%s\n", metaSuffix(v.CandidatesMeta))
+	for _, c := range v.Candidates {
+		fmt.Fprintf(w, "  #%d [%s] %s done=%d%% rules=%d %s\n",
+			c.ID, c.Status, c.Kind, c.Progress.PercentDone, len(c.Rules), c.Intent)
+		for _, r := range c.Rules {
+			fmt.Fprintf(w, "    rule #%d (under #%d) %s\n", r.ID, r.ParentID, r.Text)
+		}
+	}
 }
 
 func BuildBrief(s *State, cfg Config, actor string, scopeID int64) (BriefView, error) {
@@ -143,19 +229,24 @@ func BuildBriefWithOptions(s *State, cfg Config, actor string, opts BriefOptions
 			bv.ObligationCoverage = &coverage
 		}
 		for _, r := range s.InheritedRules(scope.ID) {
-			bv.InheritedRules = append(bv.InheritedRules, &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText})
+			bv.InheritedRules = append(bv.InheritedRules, buildRuleBrief(r))
 			if cfg.BriefMaxRules > 0 && len(bv.InheritedRules) >= cfg.BriefMaxRules {
 				break
 			}
 		}
-		children, total := s.ChildWorkNodes(scope.ID, cfg.BriefMaxTasks)
+		children, total := s.ChildWorkNodesWithArchive(scope.ID, cfg.BriefMaxTasks, opts.IncludeArchived)
 		completedTotal := 0
 		if !opts.History {
-			children, total, completedTotal = s.FrontierChildWorkNodes(scope.ID, cfg.BriefMaxTasks)
+			children, total, completedTotal = s.FrontierChildWorkNodesWithArchive(scope.ID, cfg.BriefMaxTasks, opts.IncludeArchived)
 		}
 		bv.SubtreesMeta = collectionMeta(total, len(children))
 		if completedTotal > 0 {
 			bv.CompletedSubtrees = collectionMeta(completedTotal, 0)
+		}
+		if !opts.IncludeArchived {
+			if archivedTotal := s.ArchivedChildWorkTotal(scope.ID); archivedTotal > 0 {
+				bv.ArchivedSubtrees = collectionMeta(archivedTotal, 0)
+			}
 		}
 		for _, c := range children {
 			bv.Subtrees = append(bv.Subtrees, &SubtreeBrief{
@@ -212,7 +303,7 @@ func BuildBriefWithOptions(s *State, cfg Config, actor string, opts BriefOptions
 	if scopeID == 0 && root != nil {
 		scopeID = root.ID
 	}
-	for _, r := range s.RecentFailuresWithin(scopeID, cfg.BriefMaxRecent, activeRecentOnly) {
+	for _, r := range s.RecentFailuresWithinArchive(scopeID, cfg.BriefMaxRecent, activeRecentOnly, opts.IncludeArchived) {
 		bv.RecentFailures = append(bv.RecentFailures, ScriptRunBrief{
 			NodeID:    r.NodeID,
 			AttemptID: r.AttemptID,
@@ -223,7 +314,7 @@ func BuildBriefWithOptions(s *State, cfg Config, actor string, opts BriefOptions
 			At:        r.At,
 		})
 	}
-	for _, r := range s.RecentRunsWithin(scopeID, cfg.BriefMaxRecent, activeRecentOnly) {
+	for _, r := range s.RecentRunsWithinArchive(scopeID, cfg.BriefMaxRecent, activeRecentOnly, opts.IncludeArchived) {
 		bv.RecentRuns = append(bv.RecentRuns, ScriptRunBrief{
 			NodeID:    r.NodeID,
 			AttemptID: r.AttemptID,
@@ -235,14 +326,21 @@ func BuildBriefWithOptions(s *State, cfg Config, actor string, opts BriefOptions
 		})
 	}
 	if opts.History || (bv.Summary != nil && bv.Summary.OpenTasks == 0) {
-		bv.RecentDone = s.RecentCompleted(cfg.BriefMaxRecent)
-		bv.RecentCanceled = s.RecentCanceled(cfg.BriefMaxRecent)
+		bv.RecentDone = s.RecentCompletedWithArchive(cfg.BriefMaxRecent, opts.IncludeArchived)
+		bv.RecentCanceled = s.RecentCanceledWithArchive(cfg.BriefMaxRecent, opts.IncludeArchived)
 	}
 	return bv, nil
 }
 
 func collectionMeta(total, shown int) *CollectionMeta {
 	return &CollectionMeta{Total: total, Shown: shown, Truncated: shown < total}
+}
+
+func buildRuleBrief(r *Node) *RuleBrief {
+	if r == nil {
+		return nil
+	}
+	return &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText, RuleOrigin: cloneRuleOrigin(r.RuleOrigin)}
 }
 
 func buildTaskBrief(s *State, t *Node) *TaskBrief {
@@ -306,6 +404,10 @@ func RenderBriefText(w io.Writer, bv BriefView) {
 	if bv.CompletedSubtrees != nil && bv.CompletedSubtrees.Total > 0 {
 		fmt.Fprintf(w, "completed subtrees: %d hidden (use cst brief --history to inspect)\n",
 			bv.CompletedSubtrees.Total)
+	}
+	if bv.ArchivedSubtrees != nil && bv.ArchivedSubtrees.Total > 0 {
+		fmt.Fprintf(w, "archived subtrees: %d hidden (use --include-archived to inspect)\n",
+			bv.ArchivedSubtrees.Total)
 	}
 	if len(bv.InheritedRules) > 0 {
 		fmt.Fprintln(w, "rules:")
@@ -478,6 +580,7 @@ type ShowView struct {
 	InheritedRules     []*RuleBrief        `json:"inherited_rules,omitempty"`
 	Children           []*ChildBrief       `json:"children,omitempty"`
 	ChildrenMeta       *CollectionMeta     `json:"children_meta,omitempty"`
+	ArchivedChildren   *CollectionMeta     `json:"archived_children_meta,omitempty"`
 	RecentRuns         []ScriptRunRecord   `json:"recent_runs,omitempty"`
 	RecentRunsMeta     *CollectionMeta     `json:"recent_runs_meta,omitempty"`
 	RecentEvidence     []EvidenceRecord    `json:"recent_evidence,omitempty"`
@@ -494,6 +597,7 @@ type NodeDetail struct {
 	Kind                 string             `json:"kind"`
 	Intent               string             `json:"intent,omitempty"`
 	RuleText             string             `json:"rule_text,omitempty"`
+	RuleOrigin           *RuleOrigin        `json:"rule_origin,omitempty"`
 	Acceptance           *Acceptance        `json:"acceptance,omitempty"`
 	Envelope             *ExecutionEnvelope `json:"execution_envelope,omitempty"`
 	Context              *NodeContext       `json:"context,omitempty"`
@@ -507,6 +611,8 @@ type NodeDetail struct {
 	CompletedEvidenceIDs []string           `json:"completed_evidence_ids,omitempty"`
 	CanceledAt           time.Time          `json:"canceled_at,omitempty"`
 	CanceledReason       string             `json:"canceled_reason,omitempty"`
+	ArchivedAt           time.Time          `json:"archived_at,omitempty"`
+	ArchivedReason       string             `json:"archived_reason,omitempty"`
 	Claim                *Claim             `json:"claim,omitempty"`
 	Hold                 *Hold              `json:"hold,omitempty"`
 	LastEvent            time.Time          `json:"last_event,omitempty"`
@@ -518,9 +624,18 @@ type ChildBrief struct {
 	Intent   string `json:"intent,omitempty"`
 	RuleText string `json:"rule_text,omitempty"`
 	Status   string `json:"status"`
+	Archived bool   `json:"archived,omitempty"`
 }
 
 func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
+	return BuildShowWithOptions(s, id, cfg, ShowOptions{})
+}
+
+type ShowOptions struct {
+	IncludeArchived bool
+}
+
+func BuildShowWithOptions(s *State, id int64, cfg Config, opts ShowOptions) (ShowView, error) {
 	n, ok := s.Nodes[id]
 	if !ok {
 		return ShowView{}, fmt.Errorf("node #%d not found", id)
@@ -542,11 +657,17 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 			v.ObligationCoverage = &coverage
 		}
 	}
-	children := n.Children
+	children := filterArchivedChildren(s, n.Children, opts.IncludeArchived)
 	if cfg.BriefMaxTasks > 0 && len(children) > cfg.BriefMaxTasks {
 		children = children[:cfg.BriefMaxTasks]
 	}
-	v.ChildrenMeta = collectionMeta(len(n.Children), len(children))
+	visibleTotal := len(filterArchivedChildren(s, n.Children, opts.IncludeArchived))
+	v.ChildrenMeta = collectionMeta(visibleTotal, len(children))
+	if !opts.IncludeArchived {
+		if archivedTotal := archivedChildTotal(s, n.Children); archivedTotal > 0 {
+			v.ArchivedChildren = collectionMeta(archivedTotal, 0)
+		}
+	}
 	for _, cid := range children {
 		c := s.Nodes[cid]
 		v.Children = append(v.Children, &ChildBrief{
@@ -555,6 +676,7 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 			Intent:   c.Intent,
 			RuleText: c.RuleText,
 			Status:   string(s.NodeStatus(c)),
+			Archived: c.Archived,
 		})
 	}
 	v.RecentRuns = recentRunsForNode(n, cfg.BriefMaxRecent)
@@ -564,9 +686,29 @@ func BuildShow(s *State, id int64, cfg Config) (ShowView, error) {
 	v.LatestContextDrift = latestEvidenceOfKind(n, EvidenceContextDrift)
 	v.Closure = closureProjection(n)
 	for _, r := range s.InheritedRules(id) {
-		v.InheritedRules = append(v.InheritedRules, &RuleBrief{ID: r.ID, ParentID: r.ParentID, Text: r.RuleText})
+		v.InheritedRules = append(v.InheritedRules, buildRuleBrief(r))
 	}
 	return v, nil
+}
+
+func filterArchivedChildren(s *State, children []int64, includeArchived bool) []int64 {
+	out := make([]int64, 0, len(children))
+	for _, cid := range children {
+		if includeArchived || !s.IsArchived(cid) {
+			out = append(out, cid)
+		}
+	}
+	return out
+}
+
+func archivedChildTotal(s *State, children []int64) int {
+	total := 0
+	for _, cid := range children {
+		if s.IsArchived(cid) {
+			total++
+		}
+	}
+	return total
 }
 
 func buildNodeDetail(n *Node) *NodeDetail {
@@ -576,6 +718,7 @@ func buildNodeDetail(n *Node) *NodeDetail {
 		Kind:             n.Kind,
 		Intent:           n.Intent,
 		RuleText:         n.RuleText,
+		RuleOrigin:       cloneRuleOrigin(n.RuleOrigin),
 		Acceptance:       n.Acceptance,
 		Envelope:         cloneExecutionEnvelope(n.Envelope),
 		Context:          cloneNodeContext(n.Context),
@@ -598,6 +741,10 @@ func buildNodeDetail(n *Node) *NodeDetail {
 	if n.Canceled {
 		d.CanceledAt = n.CanceledAt
 		d.CanceledReason = n.CanceledReason
+	}
+	if n.Archived {
+		d.ArchivedAt = n.ArchivedAt
+		d.ArchivedReason = n.ArchivedReason
 	}
 	return d
 }
@@ -643,6 +790,9 @@ func RenderShowText(w io.Writer, v ShowView) {
 	}
 	if n.RuleText != "" {
 		fmt.Fprintf(w, "rule: %s\n", n.RuleText)
+	}
+	if n.RuleOrigin != nil {
+		fmt.Fprintf(w, "rule origin: source=#%d reason=%q\n", n.RuleOrigin.SourceRuleID, n.RuleOrigin.Reason)
 	}
 	if n.Acceptance != nil {
 		switch n.Acceptance.Kind {
@@ -697,6 +847,9 @@ func RenderShowText(w io.Writer, v ShowView) {
 	if !n.CanceledAt.IsZero() {
 		fmt.Fprintf(w, "canceled: at=%s reason=%q\n", n.CanceledAt.Format(time.RFC3339), n.CanceledReason)
 	}
+	if !n.ArchivedAt.IsZero() {
+		fmt.Fprintf(w, "archived: at=%s reason=%q\n", n.ArchivedAt.Format(time.RFC3339), n.ArchivedReason)
+	}
 	if v.Progress != nil {
 		fmt.Fprintf(w, "progress: total=%d open=%d ready=%d claimed=%d held=%d completed=%d canceled=%d done=%d%%\n",
 			v.Progress.TotalTasks, v.Progress.OpenTasks, v.Progress.ReadyTasks,
@@ -727,8 +880,15 @@ func RenderShowText(w io.Writer, v ShowView) {
 			if label == "" {
 				label = c.RuleText
 			}
-			fmt.Fprintf(w, "  #%d [%s] %s %s\n", c.ID, c.Status, c.Kind, label)
+			archived := ""
+			if c.Archived {
+				archived = " archived"
+			}
+			fmt.Fprintf(w, "  #%d [%s%s] %s %s\n", c.ID, c.Status, archived, c.Kind, label)
 		}
+	}
+	if v.ArchivedChildren != nil && v.ArchivedChildren.Total > 0 {
+		fmt.Fprintf(w, "archived children: %d hidden (use --include-archived to inspect)\n", v.ArchivedChildren.Total)
 	}
 	if len(v.RecentRuns) > 0 {
 		fmt.Fprintf(w, "recent runs:%s\n", metaSuffix(v.RecentRunsMeta))
@@ -767,8 +927,12 @@ func RenderEventsText(w io.Writer, events []*Event) {
 		case EvNodeCreated:
 			label := e.Kind
 			if label == KindRule {
-				fmt.Fprintf(w, "%s  #%d  rule under #%d  %q\n",
-					e.Timestamp.Format(time.RFC3339), e.NodeID, e.ParentID, e.RuleText)
+				origin := ""
+				if e.RuleOrigin != nil {
+					origin = fmt.Sprintf(" promoted_from=#%d", e.RuleOrigin.SourceRuleID)
+				}
+				fmt.Fprintf(w, "%s  #%d  rule under #%d%s  %q\n",
+					e.Timestamp.Format(time.RFC3339), e.NodeID, e.ParentID, origin, e.RuleText)
 			} else {
 				acceptance := ""
 				if e.Acceptance != nil {
@@ -840,6 +1004,10 @@ func RenderEventsText(w io.Writer, events []*Event) {
 			fmt.Fprintf(w, "%s  #%d  hold cleared\n", e.Timestamp.Format(time.RFC3339), e.NodeID)
 		case EvNodeCanceled:
 			fmt.Fprintf(w, "%s  #%d  canceled reason=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, e.Reason)
+		case EvNodeArchived:
+			fmt.Fprintf(w, "%s  #%d  archived reason=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, e.Reason)
+		case EvNodeUnarchived:
+			fmt.Fprintf(w, "%s  #%d  unarchived reason=%q\n", e.Timestamp.Format(time.RFC3339), e.NodeID, e.Reason)
 		default:
 			fmt.Fprintf(w, "%s  #%d  %s\n", e.Timestamp.Format(time.RFC3339), e.NodeID, e.Type)
 		}

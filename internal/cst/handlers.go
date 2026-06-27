@@ -81,6 +81,15 @@ type EvidenceArgs struct {
 	Data    string
 }
 
+type ArchiveArgs struct {
+	Reason string
+}
+
+type RulePromoteArgs struct {
+	To     int64
+	Reason string
+}
+
 type TakeView struct {
 	Claim    *Event             `json:"claim"`
 	Briefing *DeveloperBriefing `json:"briefing,omitempty"`
@@ -1055,6 +1064,84 @@ func DoCancel(out io.Writer, id int64, reason string, asJSON bool) error {
 	return nil
 }
 
+func DoArchive(out io.Writer, id int64, args ArchiveArgs, asJSON bool) error {
+	var emitted *Event
+	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+		ev, err := tx.ArchiveNode(id, args.Reason)
+		if err != nil {
+			return err
+		}
+		emitted = ev
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		WriteJSON(out, emitted)
+	} else {
+		fmt.Fprintf(out, "#%d archived\n", id)
+	}
+	return nil
+}
+
+func DoUnarchive(out io.Writer, id int64, args ArchiveArgs, asJSON bool) error {
+	var emitted *Event
+	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+		ev, err := tx.UnarchiveNode(id, args.Reason)
+		if err != nil {
+			return err
+		}
+		emitted = ev
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		WriteJSON(out, emitted)
+	} else {
+		fmt.Fprintf(out, "#%d unarchived\n", id)
+	}
+	return nil
+}
+
+func DoRulePromote(out io.Writer, id int64, args RulePromoteArgs, asJSON bool) error {
+	var emitted *Event
+	err := WithStore(TxOpts{Mutating: true, RepairLease: true}, func(tx *Tx) error {
+		ev, err := tx.PromoteRule(id, args.To, args.Reason)
+		if err != nil {
+			return err
+		}
+		emitted = ev
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		WriteJSON(out, emitted)
+	} else {
+		fmt.Fprintf(out, "promoted rule #%d to #%d as #%d\n", id, args.To, emitted.NodeID)
+	}
+	return nil
+}
+
+func DoArchivePlan(out io.Writer, scopeID int64, asJSON bool) error {
+	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
+		view, err := BuildArchivePlan(tx.state, tx.cfg, tx.actor, scopeID)
+		if err != nil {
+			return herr(ExitNotFound, "%s", err.Error())
+		}
+		if asJSON {
+			WriteJSON(out, view)
+		} else {
+			RenderArchivePlanText(out, view)
+		}
+		return nil
+	})
+}
+
 func DoBrief(out io.Writer, scopeID int64, asJSON bool) error {
 	return DoBriefWithOptions(out, BriefOptions{ScopeID: scopeID}, asJSON)
 }
@@ -1075,8 +1162,12 @@ func DoBriefWithOptions(out io.Writer, opts BriefOptions, asJSON bool) error {
 }
 
 func DoShow(out io.Writer, id int64, asJSON bool) error {
+	return DoShowWithOptions(out, id, ShowOptions{}, asJSON)
+}
+
+func DoShowWithOptions(out io.Writer, id int64, opts ShowOptions, asJSON bool) error {
 	return WithStore(TxOpts{Mutating: false, RepairLease: false}, func(tx *Tx) error {
-		v, err := BuildShow(tx.state, id, tx.cfg)
+		v, err := BuildShowWithOptions(tx.state, id, tx.cfg, opts)
 		if err != nil {
 			return herr(ExitNotFound, "%s", err.Error())
 		}

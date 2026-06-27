@@ -41,6 +41,9 @@ func renderTop(sb *strings.Builder, v uiView) {
 	if action := uiProcedureAction(v); action != "" {
 		fmt.Fprintf(sb, `<span class="tag active">%s</span>`, html.EscapeString(action))
 	}
+	if v.ArchivedSubtreeTotal > 0 {
+		fmt.Fprintf(sb, `<span class="tag">%d archived hidden</span>`, v.ArchivedSubtreeTotal)
+	}
 	sb.WriteString(`</div></div>`)
 	fmt.Fprintf(sb, `<div class="progress-total">%d%%</div>`, v.Summary.PercentDone)
 	sb.WriteString(`</header>`)

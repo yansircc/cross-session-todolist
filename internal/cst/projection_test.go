@@ -413,6 +413,140 @@ func TestReadProjectionsDoNotRepairExpiredClaims(t *testing.T) {
 	}
 }
 
+func TestArchivePlanAndProjectionFiltering(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Goal: true, Intent: "old stream"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 2, Rule: "promote me if still global"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 2, Intent: "old task", AcceptanceReview: "self"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoTake(io.Discard, 4, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoDone(io.Discard, 4, DoneArgs{Note: "reviewed"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Goal: true, Intent: "active stream"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 5, Intent: "current task", AcceptanceReview: "self"}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	state := replayState(t)
+	plan, err := BuildArchivePlan(state, DefaultConfig(), "agent", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 1 || plan.Candidates[0].ID != 2 || len(plan.Candidates[0].Rules) != 1 {
+		t.Fatalf("archive plan should propose terminal old stream with rules, got %+v", plan.Candidates)
+	}
+
+	if err := DoArchive(io.Discard, 2, ArchiveArgs{Reason: "fold terminal stream"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 2, Intent: "new child in archive", AcceptanceReview: "self"}, false); err == nil {
+		t.Fatal("adding work under archived subtree should fail")
+	}
+	if err := DoRevise(io.Discard, 2, ReviseArgs{Intent: "mutate archived stream"}, false); err == nil {
+		t.Fatal("revising archived subtree should fail")
+	}
+
+	state = replayState(t)
+	history, err := BuildBriefWithOptions(state, DefaultConfig(), "agent", BriefOptions{ScopeID: 1, History: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.ArchivedSubtrees == nil || history.ArchivedSubtrees.Total != 1 {
+		t.Fatalf("default brief should report hidden archived subtree, got %+v", history.ArchivedSubtrees)
+	}
+	if len(history.Subtrees) != 1 || history.Subtrees[0].ID != 5 {
+		t.Fatalf("default history brief should hide archived subtree, got %+v", history.Subtrees)
+	}
+	if len(history.RecentDone) != 0 {
+		t.Fatalf("default history brief should hide archived recent done, got %+v", history.RecentDone)
+	}
+
+	withArchive, err := BuildBriefWithOptions(state, DefaultConfig(), "agent", BriefOptions{ScopeID: 1, History: true, IncludeArchived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withArchive.Subtrees) != 2 || withArchive.Subtrees[0].ID != 2 || withArchive.Subtrees[1].ID != 5 {
+		t.Fatalf("include-archived should restore archived child history, got %+v", withArchive.Subtrees)
+	}
+	if len(withArchive.RecentDone) == 0 || withArchive.RecentDone[0] != 4 {
+		t.Fatalf("include-archived should restore archived recent done, got %+v", withArchive.RecentDone)
+	}
+
+	show, err := BuildShowWithOptions(state, 1, DefaultConfig(), ShowOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if show.ArchivedChildren == nil || show.ArchivedChildren.Total != 1 {
+		t.Fatalf("default show should report hidden archived child, got %+v", show.ArchivedChildren)
+	}
+	if len(show.Children) != 1 || show.Children[0].ID != 5 {
+		t.Fatalf("default show should hide archived child, got %+v", show.Children)
+	}
+	showAll, err := BuildShowWithOptions(state, 1, DefaultConfig(), ShowOptions{IncludeArchived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(showAll.Children) != 2 || !showAll.Children[0].Archived {
+		t.Fatalf("include-archived show should restore archived child marker, got %+v", showAll.Children)
+	}
+
+	uiDefault := uiViewFromWithOptions(state, 1, EventsPath(), "sample", 0, time.Now(), uiViewOptions{})
+	if uiDefault.TotalTasks != 1 || uiDefault.ArchivedSubtreeTotal != 1 {
+		t.Fatalf("default ui view should fold archived tasks, got total=%d archived=%d", uiDefault.TotalTasks, uiDefault.ArchivedSubtreeTotal)
+	}
+	uiAll := uiViewFromWithOptions(state, 1, EventsPath(), "sample", 0, time.Now(), uiViewOptions{IncludeArchived: true})
+	if uiAll.TotalTasks != 2 {
+		t.Fatalf("include-archived ui view should include archived tasks, got %d", uiAll.TotalTasks)
+	}
+}
+
+func TestArchiveHandlersPromoteRulesAsNormalAncestorRules(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Goal: true, Intent: "old stream"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 2, Rule: "future work keeps one fact in one location"}, false); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := DoRulePromote(&out, 3, RulePromoteArgs{To: 1, Reason: "still global"}, true); err != nil {
+		t.Fatal(err)
+	}
+	var promoted Event
+	if err := json.Unmarshal(out.Bytes(), &promoted); err != nil {
+		t.Fatalf("promotion output is not event JSON: %v\n%s", err, out.String())
+	}
+	if promoted.Kind != KindRule || promoted.RuleOrigin == nil || promoted.RuleOrigin.SourceRuleID != 3 {
+		t.Fatalf("promotion handler emitted wrong event: %+v", promoted)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 1, Goal: true, Intent: "future stream"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{Parent: 5, Intent: "future task", AcceptanceReview: "self"}, false); err != nil {
+		t.Fatal(err)
+	}
+	rules := replayState(t).InheritedRules(6)
+	if len(rules) != 1 || rules[0].ID != promoted.NodeID || rules[0].RuleOrigin == nil {
+		t.Fatalf("future task should inherit promoted normal rule with origin, got %+v", rules)
+	}
+}
+
 func seedExpiredClaim(t *testing.T) {
 	t.Helper()
 	now := time.Now().Add(-2 * time.Hour)

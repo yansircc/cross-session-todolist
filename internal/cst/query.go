@@ -316,6 +316,10 @@ func (s *State) IsWithin(scopeID, nodeID int64) bool {
 }
 
 func (s *State) ChildWorkNodes(parentID int64, limit int) ([]*Node, int) {
+	return s.ChildWorkNodesWithArchive(parentID, limit, true)
+}
+
+func (s *State) ChildWorkNodesWithArchive(parentID int64, limit int, includeArchived bool) ([]*Node, int) {
 	var out []*Node
 	parent, ok := s.Nodes[parentID]
 	if !ok {
@@ -327,6 +331,9 @@ func (s *State) ChildWorkNodes(parentID int64, limit int) ([]*Node, int) {
 		if c.Kind != KindTask && c.Kind != KindGoal {
 			continue
 		}
+		if !includeArchived && s.IsArchived(c.ID) {
+			continue
+		}
 		total++
 		if limit <= 0 || len(out) < limit {
 			out = append(out, c)
@@ -335,11 +342,33 @@ func (s *State) ChildWorkNodes(parentID int64, limit int) ([]*Node, int) {
 	return out, total
 }
 
+func (s *State) ArchivedChildWorkTotal(parentID int64) int {
+	parent, ok := s.Nodes[parentID]
+	if !ok {
+		return 0
+	}
+	total := 0
+	for _, cid := range parent.Children {
+		c := s.Nodes[cid]
+		if c == nil || (c.Kind != KindTask && c.Kind != KindGoal) {
+			continue
+		}
+		if s.IsArchived(c.ID) {
+			total++
+		}
+	}
+	return total
+}
+
 // FrontierChildWorkNodes returns direct child work nodes that still contain
 // open tasks. Completed/canceled child subtrees are counted separately so the
 // default brief can show the current frontier without losing the closed-history
 // count.
 func (s *State) FrontierChildWorkNodes(parentID int64, limit int) ([]*Node, int, int) {
+	return s.FrontierChildWorkNodesWithArchive(parentID, limit, true)
+}
+
+func (s *State) FrontierChildWorkNodesWithArchive(parentID int64, limit int, includeArchived bool) ([]*Node, int, int) {
 	var out []*Node
 	parent, ok := s.Nodes[parentID]
 	if !ok {
@@ -350,6 +379,9 @@ func (s *State) FrontierChildWorkNodes(parentID int64, limit int) ([]*Node, int,
 	for _, cid := range parent.Children {
 		c := s.Nodes[cid]
 		if c.Kind != KindTask && c.Kind != KindGoal {
+			continue
+		}
+		if !includeArchived && s.IsArchived(c.ID) {
 			continue
 		}
 		p := s.SubtreeProgress(c.ID)
@@ -523,10 +555,17 @@ func (s *State) RecentRuns(limit int) []ScriptRunRecord {
 }
 
 func (s *State) RecentRunsWithin(scopeID int64, limit int, activeOnly bool) []ScriptRunRecord {
+	return s.RecentRunsWithinArchive(scopeID, limit, activeOnly, true)
+}
+
+func (s *State) RecentRunsWithinArchive(scopeID int64, limit int, activeOnly bool, includeArchived bool) []ScriptRunRecord {
 	var all []ScriptRunRecord
 	for _, id := range s.Order {
 		n := s.Nodes[id]
 		if !s.IsWithin(scopeID, n.ID) {
+			continue
+		}
+		if !includeArchived && s.IsArchived(n.ID) {
 			continue
 		}
 		if activeOnly && n.Terminal() {
@@ -546,8 +585,12 @@ func (s *State) RecentFailures(limit int) []ScriptRunRecord {
 }
 
 func (s *State) RecentFailuresWithin(scopeID int64, limit int, activeOnly bool) []ScriptRunRecord {
+	return s.RecentFailuresWithinArchive(scopeID, limit, activeOnly, true)
+}
+
+func (s *State) RecentFailuresWithinArchive(scopeID int64, limit int, activeOnly bool, includeArchived bool) []ScriptRunRecord {
 	var out []ScriptRunRecord
-	for _, r := range s.RecentRunsWithin(scopeID, 0, activeOnly) {
+	for _, r := range s.RecentRunsWithinArchive(scopeID, 0, activeOnly, includeArchived) {
 		if r.ExitCode != 0 {
 			out = append(out, r)
 			if limit > 0 && len(out) >= limit {
@@ -560,9 +603,22 @@ func (s *State) RecentFailuresWithin(scopeID int64, limit int, activeOnly bool) 
 
 // RecentCompleted returns the latest completed task ids, newest first.
 func (s *State) RecentCompleted(limit int) []int64 {
+	return s.RecentCompletedWithArchive(limit, true)
+}
+
+func (s *State) RecentCompletedWithArchive(limit int, includeArchived bool) []int64 {
 	out := append([]int64(nil), s.completedOrder...)
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	if !includeArchived {
+		filtered := out[:0]
+		for _, id := range out {
+			if !s.IsArchived(id) {
+				filtered = append(filtered, id)
+			}
+		}
+		out = filtered
 	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
@@ -572,9 +628,22 @@ func (s *State) RecentCompleted(limit int) []int64 {
 
 // RecentCanceled returns the latest canceled node ids, newest first.
 func (s *State) RecentCanceled(limit int) []int64 {
+	return s.RecentCanceledWithArchive(limit, true)
+}
+
+func (s *State) RecentCanceledWithArchive(limit int, includeArchived bool) []int64 {
 	out := append([]int64(nil), s.canceledOrder...)
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	if !includeArchived {
+		filtered := out[:0]
+		for _, id := range out {
+			if !s.IsArchived(id) {
+				filtered = append(filtered, id)
+			}
+		}
+		out = filtered
 	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]

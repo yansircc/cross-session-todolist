@@ -44,16 +44,17 @@ Command surface:
   cst add  --parent <id> --rule "Invariant or context visible to agents"
   cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--clear-context] [--owned <path>] [--excluded <path>] [--clear-boundary] [--obligation-claim <name> | --clear-obligation-claims] [--after <id> ... | --clear-after] [--reason "..."]
 
-  cst brief [--within <id>] [--history]
+  cst brief [--within <id>] [--history] [--include-archived]
   cst claims [--within <id>]
   cst recover [--within <id>]
-  cst show <id>
+  cst show <id> [--include-archived]
+  cst archive-plan [--within <id>]
   cst events --for <id>
   cst events --attempt <attempt-id>
   cst events --since <event-id>
   cst events --for <id> --attempt <attempt-id> --since <event-id>
   cst events --all --raw
-  cst ui [--within <id>] [-o <path>] [--no-open] [--stdout]
+  cst ui [--within <id>] [--include-archived] [-o <path>] [--no-open] [--stdout]
 
   cst take [<task-id>] [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...]
   cst release <task-id>
@@ -65,6 +66,9 @@ Command surface:
   cst worker-run <task-id> --action <action-id> [--commit <sha>]
   cst evidence <id> --kind <kind> --summary "..." [--data JSON]
   cst evidence <id> --kind note --summary "Process note..."
+  cst rule promote <rule-id> --to <ancestor-id> --reason "..."
+  cst archive <id> --reason "..."
+  cst unarchive <id> --reason "..."
   cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
   cst done <task-id> --from-acceptance <evidence-id> [--commit <sha>]
   cst done <task-id> [--evidence <event-id> ... | --note "..."]
@@ -85,8 +89,9 @@ Read semantics:
   cst brief is the bounded work projection. By default it is frontier-first:
   active child subtrees are expanded and completed child subtrees are counted.
   Use cst brief --history to inspect completed child subtrees and historical
-  recent runs/failures. It reports total/shown/truncated metadata for bounded
-  collections.
+  recent runs/failures. Archived terminal subtrees are folded by default; use
+  --include-archived to include them in bounded projections. It reports
+  total/shown/truncated metadata for bounded collections.
   cst show is a bounded single-node view with aggregate progress, completed
   evidence ids, closure projection, and previews.
   cst claims and cst recover are read-only claim recovery projections. They
@@ -151,6 +156,10 @@ Evidence and scripts:
   binding sidecars are accepted only when their store_id matches the replayed
   central ledger root; read projections use that central store.
   cst evidence records structured evidence; --data must be JSON.
+  cst archive records a reversible visibility marker on completed/canceled
+  goal/task subtrees. It never rewrites events or retains rules. Rules that
+  should govern future work must be promoted explicitly with cst rule promote,
+  which creates a normal ancestor rule node with origin trace.
   boundary evidence has {"includes":[],"excludes":[]} and is checked against the
   accepted diff. rationale evidence is structured attestation, projected and
   contestable, not reducer-proved. contest evidence marks boundary/rationale
@@ -274,6 +283,14 @@ func main() {
 		err = runWorkerRun(args, asJSON)
 	case "evidence":
 		err = runEvidence(args, asJSON)
+	case "rule":
+		err = runRule(args, asJSON)
+	case "archive":
+		err = runArchive(args, asJSON)
+	case "unarchive":
+		err = runUnarchive(args, asJSON)
+	case "archive-plan":
+		err = runArchivePlan(args, asJSON)
 	case "done":
 		err = runDone(args, asJSON)
 	case "cancel":
@@ -325,7 +342,7 @@ func runNext(args []string, asJSON bool) error {
 
 func commandMutates(cmd string) bool {
 	switch cmd {
-	case "add", "revise", "take", "release", "hold", "run", "worker-run", "evidence", "done", "cancel":
+	case "add", "revise", "take", "release", "hold", "run", "worker-run", "evidence", "rule", "archive", "unarchive", "done", "cancel":
 		return true
 	default:
 		return false
@@ -953,11 +970,92 @@ func runCancel(args []string, asJSON bool) error {
 	return cst.DoCancel(os.Stdout, id, *reason, asJSON)
 }
 
+func runArchive(args []string, asJSON bool) error {
+	id, rest, err := splitIDArg(args, "archive")
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("archive", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	reason := fs.String("reason", "", "archive reason")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	return cst.DoArchive(os.Stdout, id, cst.ArchiveArgs{Reason: *reason}, asJSON)
+}
+
+func runUnarchive(args []string, asJSON bool) error {
+	id, rest, err := splitIDArg(args, "unarchive")
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("unarchive", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	reason := fs.String("reason", "", "unarchive reason")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	return cst.DoUnarchive(os.Stdout, id, cst.ArchiveArgs{Reason: *reason}, asJSON)
+}
+
+func runRule(args []string, asJSON bool) error {
+	if len(args) == 0 {
+		return fmt.Errorf("rule requires a subcommand")
+	}
+	switch args[0] {
+	case "promote":
+		id, rest, err := splitIDArg(args[1:], "rule promote")
+		if err != nil {
+			return err
+		}
+		fs := flag.NewFlagSet("rule promote", flag.ContinueOnError)
+		format := addCommandFormatFlags(fs)
+		to := fs.Int64("to", 0, "ancestor id to receive promoted rule")
+		reason := fs.String("reason", "", "promotion reason")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		asJSON, err = resolveCommandFormat(fs, asJSON, format)
+		if err != nil {
+			return err
+		}
+		return cst.DoRulePromote(os.Stdout, id, cst.RulePromoteArgs{To: *to, Reason: *reason}, asJSON)
+	default:
+		return fmt.Errorf("unknown rule subcommand %q", args[0])
+	}
+}
+
+func runArchivePlan(args []string, asJSON bool) error {
+	fs := flag.NewFlagSet("archive-plan", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	within := fs.Int64("within", 0, "scope archive plan to a goal/task subtree")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	asJSON, err := resolveCommandFormat(fs, asJSON, format)
+	if err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("archive-plan takes only flags")
+	}
+	return cst.DoArchivePlan(os.Stdout, *within, asJSON)
+}
+
 func runBrief(args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("brief", flag.ContinueOnError)
 	format := addCommandFormatFlags(fs)
 	within := fs.Int64("within", 0, "scope brief to a goal/task subtree")
 	history := fs.Bool("history", false, "include completed child subtrees and historical recent runs")
+	includeArchived := fs.Bool("include-archived", false, "include archived terminal history")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -968,7 +1066,7 @@ func runBrief(args []string, asJSON bool) error {
 	if len(fs.Args()) != 0 {
 		return fmt.Errorf("brief takes only flags")
 	}
-	return cst.DoBriefWithOptions(os.Stdout, cst.BriefOptions{ScopeID: *within, History: *history}, asJSON)
+	return cst.DoBriefWithOptions(os.Stdout, cst.BriefOptions{ScopeID: *within, History: *history, IncludeArchived: *includeArchived}, asJSON)
 }
 
 func runClaims(args []string, asJSON bool) error {
@@ -1006,16 +1104,21 @@ func runRecover(args []string, asJSON bool) error {
 }
 
 func runShow(args []string, asJSON bool) error {
-	var err error
-	args, asJSON, err = extractFormatFlag(args, asJSON)
+	id, rest, err := splitIDArg(args, "show")
 	if err != nil {
 		return err
 	}
-	id, err := requiredIDArg(args, "show")
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	format := addCommandFormatFlags(fs)
+	includeArchived := fs.Bool("include-archived", false, "include archived child history")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	asJSON, err = resolveCommandFormat(fs, asJSON, format)
 	if err != nil {
 		return err
 	}
-	return cst.DoShow(os.Stdout, id, asJSON)
+	return cst.DoShowWithOptions(os.Stdout, id, cst.ShowOptions{IncludeArchived: *includeArchived}, asJSON)
 }
 
 func runEvents(args []string, asJSON bool) error {
@@ -1049,6 +1152,7 @@ func runUI(args []string, asJSON bool) error {
 	fs := flag.NewFlagSet("ui", flag.ContinueOnError)
 	format := addCommandFormatFlags(fs)
 	within := fs.Int64("within", 0, "scope ui to a goal/task subtree")
+	includeArchived := fs.Bool("include-archived", false, "include archived terminal history")
 	output := fs.String("o", "", "output HTML path (default .cst/ui.html)")
 	noOpen := fs.Bool("no-open", false, "skip launching the browser")
 	stdout := fs.Bool("stdout", false, "write HTML to stdout instead of a file")
@@ -1066,10 +1170,11 @@ func runUI(args []string, asJSON bool) error {
 		return fmt.Errorf("ui --stdout and -o are mutually exclusive")
 	}
 	return cst.DoUI(os.Stdout, cst.UIArgs{
-		Within: *within,
-		Output: *output,
-		NoOpen: *noOpen || *stdout,
-		Stdout: *stdout,
+		Within:          *within,
+		Output:          *output,
+		NoOpen:          *noOpen || *stdout,
+		Stdout:          *stdout,
+		IncludeArchived: *includeArchived,
 	}, asJSON)
 }
 

@@ -128,6 +128,9 @@ func (tx *Tx) CreateGoal(parent int64, intent string, context *NodeContext, boun
 		if p.Terminal() {
 			return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
 		}
+		if tx.state.IsArchived(p.ID) {
+			return nil, herr(ExitInvariantBroken, "parent #%d is archived", parent)
+		}
 		if p.Kind != KindGoal {
 			return nil, herr(ExitInvariantBroken, "goal parent must be a goal; #%d is %s", parent, p.Kind)
 		}
@@ -169,6 +172,9 @@ func (tx *Tx) CreateTask(parent int64, intent string, acceptance *Acceptance, af
 	}
 	if p.Terminal() {
 		return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
+	}
+	if tx.state.IsArchived(p.ID) {
+		return nil, herr(ExitInvariantBroken, "parent #%d is archived", parent)
 	}
 	if !p.CanParentWork() {
 		return nil, herr(ExitInvariantBroken, "parent #%d is %s, not a goal/task", parent, p.Kind)
@@ -221,6 +227,9 @@ func (tx *Tx) CreateRule(parent int64, text string) (*Event, error) {
 	}
 	if p.Terminal() {
 		return nil, herr(ExitInvariantBroken, "parent #%d is terminal", parent)
+	}
+	if tx.state.IsArchived(p.ID) {
+		return nil, herr(ExitInvariantBroken, "parent #%d is archived", parent)
 	}
 	if !p.CanParentWork() {
 		return nil, herr(ExitInvariantBroken,
@@ -319,6 +328,9 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 	if n.Terminal() {
 		return nil, herr(ExitInvariantBroken, "node #%d already terminal", id)
 	}
+	if tx.state.IsArchived(n.ID) {
+		return nil, herr(ExitInvariantBroken, "node #%d is archived", id)
+	}
 	if n.Claim != nil {
 		return nil, herr(ExitClaimConflict, "node #%d is claimed by %s; release before revise", id, n.Claim.Actor)
 	}
@@ -338,6 +350,9 @@ func (tx *Tx) ReviseNode(id int64, spec ReviseSpec) (*Event, error) {
 			}
 			if p.Terminal() {
 				return nil, herr(ExitInvariantBroken, "parent #%d is terminal", spec.Parent)
+			}
+			if tx.state.IsArchived(p.ID) {
+				return nil, herr(ExitInvariantBroken, "parent #%d is archived", spec.Parent)
 			}
 			if !p.CanParentWork() {
 				return nil, herr(ExitInvariantBroken, "parent #%d is %s, not a goal/task", spec.Parent, p.Kind)

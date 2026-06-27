@@ -29,6 +29,7 @@ type uiView struct {
 	RuleCount             int
 	TotalTasks            int
 	CompletedSubtreeTotal int
+	ArchivedSubtreeTotal  int
 
 	RecentFailures []ScriptRunRecord
 	RecentRuns     []ScriptRunRecord
@@ -71,9 +72,17 @@ type taskRowView struct {
 	Closure     *ClosureProjection
 }
 
+type uiViewOptions struct {
+	IncludeArchived bool
+}
+
 // uiViewFrom builds a uiView from State, scoped to a subtree rooted at scopeID.
 // scopeID == 0 means the whole project.
 func uiViewFrom(s *State, scopeID int64, eventsPath, project string, totalEvents int, lastEvent time.Time) uiView {
+	return uiViewFromWithOptions(s, scopeID, eventsPath, project, totalEvents, lastEvent, uiViewOptions{})
+}
+
+func uiViewFromWithOptions(s *State, scopeID int64, eventsPath, project string, totalEvents int, lastEvent time.Time, opts uiViewOptions) uiView {
 	now := time.Now()
 	v := uiView{
 		Project:     project,
@@ -90,12 +99,18 @@ func uiViewFrom(s *State, scopeID int64, eventsPath, project string, totalEvents
 
 	if v.Scope != nil {
 		v.Summary = s.SubtreeProgress(v.Scope.ID)
-		v.CompletedSubtreeTotal = completedChildWorkTotal(s, v.Scope.ID)
+		v.CompletedSubtreeTotal = completedChildWorkTotal(s, v.Scope.ID, opts.IncludeArchived)
+		if !opts.IncludeArchived {
+			v.ArchivedSubtreeTotal = s.ArchivedChildWorkTotal(v.Scope.ID)
+		}
 	}
 
 	for _, id := range s.Order {
 		n := s.Nodes[id]
 		if scopeID != 0 && !s.IsWithin(scopeID, id) {
+			continue
+		}
+		if !opts.IncludeArchived && s.IsArchived(id) {
 			continue
 		}
 		switch n.Kind {
@@ -109,21 +124,24 @@ func uiViewFrom(s *State, scopeID int64, eventsPath, project string, totalEvents
 	}
 
 	activeOnly := v.Summary.OpenTasks > 0
-	v.RecentRuns = recentUIRuns(s, scopeID, false, activeOnly, uiRecentLimit)
-	v.RecentFailures = recentUIRuns(s, scopeID, true, activeOnly, uiRecentLimit)
-	v.RecentDone = recentCompletedWithin(s, scopeID, uiRecentLimit)
-	v.RecentCanceled = recentCanceledWithin(s, scopeID, uiRecentLimit)
+	v.RecentRuns = recentUIRuns(s, scopeID, false, activeOnly, uiRecentLimit, opts.IncludeArchived)
+	v.RecentFailures = recentUIRuns(s, scopeID, true, activeOnly, uiRecentLimit, opts.IncludeArchived)
+	v.RecentDone = recentCompletedWithin(s, scopeID, uiRecentLimit, opts.IncludeArchived)
+	v.RecentCanceled = recentCanceledWithin(s, scopeID, uiRecentLimit, opts.IncludeArchived)
 	v.CurrentClaims, _ = s.CurrentClaimsWithin(scopeID, uiRecentLimit)
-	v.ActivePhases = buildActivePhases(s, scopeID)
+	v.ActivePhases = buildActivePhases(s, scopeID, opts.IncludeArchived)
 
 	return v
 }
 
-func buildActivePhases(s *State, scopeID int64) []phaseView {
+func buildActivePhases(s *State, scopeID int64, includeArchived bool) []phaseView {
 	phaseIDs := map[int64]struct{}{}
 	for _, id := range s.Order {
 		n := s.Nodes[id]
 		if n.Kind != KindTask || n.Terminal() {
+			continue
+		}
+		if !includeArchived && s.IsArchived(id) {
 			continue
 		}
 		if scopeID != 0 && !s.IsWithin(scopeID, id) {
@@ -144,14 +162,14 @@ func buildActivePhases(s *State, scopeID int64) []phaseView {
 		if _, ok := phaseIDs[id]; !ok {
 			continue
 		}
-		if p := buildPhaseView(s, s.Nodes[id]); p.Node != nil {
+		if p := buildPhaseView(s, s.Nodes[id], includeArchived); p.Node != nil {
 			phases = append(phases, p)
 		}
 	}
 	return phases
 }
 
-func buildPhaseView(s *State, n *Node) phaseView {
+func buildPhaseView(s *State, n *Node, includeArchived bool) phaseView {
 	if n == nil {
 		return phaseView{}
 	}
@@ -171,7 +189,7 @@ func buildPhaseView(s *State, n *Node) phaseView {
 	_, p.HeldTotal = s.HeldTasksWithin(n.ID, 0)
 	_, p.ClaimTotal = s.CurrentClaimsWithin(n.ID, 0)
 
-	rows := buildPhaseTaskRows(s, n.ID)
+	rows := buildPhaseTaskRows(s, n.ID, includeArchived)
 	p.TaskRowsTotal = len(rows)
 	if len(rows) > uiTaskRowLimit {
 		rows = rows[:uiTaskRowLimit]
@@ -180,11 +198,14 @@ func buildPhaseView(s *State, n *Node) phaseView {
 	return p
 }
 
-func buildPhaseTaskRows(s *State, phaseID int64) []taskRowView {
+func buildPhaseTaskRows(s *State, phaseID int64, includeArchived bool) []taskRowView {
 	var rows []taskRowView
 	for _, id := range s.Order {
 		n := s.Nodes[id]
 		if n.Kind != KindTask || !s.IsWithin(phaseID, id) {
+			continue
+		}
+		if !includeArchived && s.IsArchived(id) {
 			continue
 		}
 		g := innermostGoal(s, n.ParentID)
@@ -339,7 +360,7 @@ func subtreeLastActivity(s *State, id int64) time.Time {
 	return last
 }
 
-func completedChildWorkTotal(s *State, parentID int64) int {
+func completedChildWorkTotal(s *State, parentID int64, includeArchived bool) int {
 	parent := s.Nodes[parentID]
 	if parent == nil {
 		return 0
@@ -350,6 +371,9 @@ func completedChildWorkTotal(s *State, parentID int64) int {
 		if c == nil || (c.Kind != KindTask && c.Kind != KindGoal) {
 			continue
 		}
+		if !includeArchived && s.IsArchived(c.ID) {
+			continue
+		}
 		if s.SubtreeProgress(c.ID).OpenTasks == 0 {
 			total++
 		}
@@ -357,7 +381,7 @@ func completedChildWorkTotal(s *State, parentID int64) int {
 	return total
 }
 
-func recentUIRuns(s *State, scopeID int64, failuresOnly bool, activeOnly bool, limit int) []ScriptRunRecord {
+func recentUIRuns(s *State, scopeID int64, failuresOnly bool, activeOnly bool, limit int, includeArchived bool) []ScriptRunRecord {
 	var runs []ScriptRunRecord
 	for _, id := range s.Order {
 		n := s.Nodes[id]
@@ -365,6 +389,9 @@ func recentUIRuns(s *State, scopeID int64, failuresOnly bool, activeOnly bool, l
 			continue
 		}
 		if scopeID != 0 && !s.IsWithin(scopeID, id) {
+			continue
+		}
+		if !includeArchived && s.IsArchived(id) {
 			continue
 		}
 		if activeOnly && n.Terminal() {
@@ -386,19 +413,22 @@ func recentUIRuns(s *State, scopeID int64, failuresOnly bool, activeOnly bool, l
 	return runs
 }
 
-func recentCompletedWithin(s *State, scopeID int64, limit int) []int64 {
-	return recentTerminalWithin(s, s.completedOrder, scopeID, limit)
+func recentCompletedWithin(s *State, scopeID int64, limit int, includeArchived bool) []int64 {
+	return recentTerminalWithin(s, s.completedOrder, scopeID, limit, includeArchived)
 }
 
-func recentCanceledWithin(s *State, scopeID int64, limit int) []int64 {
-	return recentTerminalWithin(s, s.canceledOrder, scopeID, limit)
+func recentCanceledWithin(s *State, scopeID int64, limit int, includeArchived bool) []int64 {
+	return recentTerminalWithin(s, s.canceledOrder, scopeID, limit, includeArchived)
 }
 
-func recentTerminalWithin(s *State, ids []int64, scopeID int64, limit int) []int64 {
+func recentTerminalWithin(s *State, ids []int64, scopeID int64, limit int, includeArchived bool) []int64 {
 	var out []int64
 	for i := len(ids) - 1; i >= 0; i-- {
 		id := ids[i]
 		if !s.IsWithin(scopeID, id) {
+			continue
+		}
+		if !includeArchived && s.IsArchived(id) {
 			continue
 		}
 		out = append(out, id)

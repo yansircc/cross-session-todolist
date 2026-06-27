@@ -115,6 +115,9 @@ func (s *State) applyOne(e *Event) error {
 			if p.Terminal() {
 				return fmt.Errorf("node #%d created under terminal parent #%d", e.NodeID, e.ParentID)
 			}
+			if s.IsArchived(p.ID) {
+				return fmt.Errorf("node #%d created under archived parent #%d", e.NodeID, e.ParentID)
+			}
 			if !p.CanParentWork() {
 				return fmt.Errorf("node #%d parent #%d must be a goal or task", e.NodeID, e.ParentID)
 			}
@@ -186,6 +189,9 @@ func (s *State) applyOne(e *Event) error {
 		}
 		if n.Terminal() {
 			return fmt.Errorf("node_revised targets terminal node #%d", e.NodeID)
+		}
+		if s.IsArchived(n.ID) {
+			return fmt.Errorf("node_revised targets archived node #%d", e.NodeID)
 		}
 		if n.Claim != nil {
 			return fmt.Errorf("node_revised targets claimed node #%d", e.NodeID)
@@ -738,6 +744,9 @@ func (s *State) moveNode(n *Node, parentID int64) error {
 	}
 	if p.Terminal() {
 		return fmt.Errorf("node_revised parent #%d is terminal", parentID)
+	}
+	if s.IsArchived(p.ID) {
+		return fmt.Errorf("node_revised parent #%d is archived", parentID)
 	}
 	if !p.CanParentWork() {
 		return fmt.Errorf("node_revised parent #%d must be a goal or task", parentID)
