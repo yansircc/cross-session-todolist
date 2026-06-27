@@ -59,6 +59,10 @@ Use `cst brief`, `cst show <task-id>`, and `cst claims` as diagnostic
 projections. They are not the primary procedure loop. Stop only when `cst next`
 returns `phase=no-op` and no claims remain.
 
+Archived terminal history is folded from default human projections. Use
+`cst brief --history --include-archived`, `cst show <id> --include-archived`,
+or `cst ui --include-archived` only when historical context is needed.
+
 ## Boundary Identity
 
 Do not let process cwd imply identity across a session or worker boundary.
@@ -187,6 +191,31 @@ makes global context recoverable; it does not prove the agent understood prose.
 Completed task boundaries are historical evidence, not current ownership for
 new dirty work. `execution.scope` / `OwnedPaths` is only execution identity and
 drift detection; do not use it to decide whether a diff belongs to a task.
+
+## Archive
+
+Archive is a reversible visibility marker for terminal goal/task subtrees:
+
+```sh
+cst archive-plan --within <goal-id>
+cst archive <id> --reason "terminal history folded after retained rules were promoted"
+cst unarchive <id> --reason "inspect historical context"
+```
+
+Archive never deletes events, rewrites evidence, migrates `events.jsonl`, or
+retains rules through a second inheritance path. Archived subtrees cannot
+receive new child work or revisions. Raw events and explicit
+`--include-archived` projections remain recoverable.
+
+If a historical rule should govern future work, promote it to an active ancestor
+as a normal rule node with origin trace:
+
+```sh
+cst rule promote <rule-id> --to <ancestor-id> --reason "still applies globally"
+```
+
+Do not create `archive.retained_rules`, sidecar summaries, or copied rule state.
+Rule inheritance still comes only from rule nodes on the current ancestor chain.
 
 ## Verifier Contracts
 

@@ -78,6 +78,7 @@ goal = node + aggregate progress + non-claimable + derived completion
 task = node + acceptance + after prerequisites + claimable + completable
 rule = node + text + inherited projection + non-claimable + non-completable
 attempt = claim-scoped correlation id for run/evidence/completion events
+archive = reversible visibility marker over terminal goal/task history
 ```
 
 Goals are not taken or completed directly. A goal is complete when every
@@ -94,6 +95,10 @@ external current-state file.
 
 Rules are context. `brief` and `show` project inherited rules so the next agent
 does not need to rediscover stable constraints.
+
+Archive is projection state, not deletion. It folds terminal history out of
+default human projections without changing replay, completion evidence, or raw
+events.
 
 ## Node Context, Boundary, And Obligations
 
@@ -199,6 +204,45 @@ cst cancel <id> --reason "merged into #12"
 Stop only when `cst brief` reports the root goal as `completed` and `claims` is
 empty.
 
+## Archive
+
+Archive folds completed/canceled goal or task subtrees out of default human
+projections. It does not delete events, rewrite history, clear evidence, or
+retain rules through a second inheritance path.
+
+Use the read-only planner first:
+
+```sh
+cst archive-plan --within <goal-id>
+```
+
+Archive only terminal history:
+
+```sh
+cst archive <id> --reason "terminal history folded after review"
+cst unarchive <id> --reason "inspect historical context"
+```
+
+Archived subtrees cannot receive new child work or revisions. Raw replay and
+explicit history remain recoverable:
+
+```sh
+cst brief --history --include-archived
+cst show <id> --include-archived
+cst ui --include-archived
+cst events --for <id>
+```
+
+Rules are not retained by archive. If a historical rule should govern future
+work, promote it to an active ancestor as a normal rule node with origin trace:
+
+```sh
+cst rule promote <rule-id> --to <ancestor-id> --reason "still applies globally"
+```
+
+Do not add `archive.retained_rules` or copy rules into sidecar state. The tree
+remains the only rule inheritance source.
+
 ## Command Surface
 
 ```sh
@@ -210,16 +254,17 @@ cst add  ... [--invariant "..."] [--non-goal "..."] [--success-obligation <name>
 cst add  --parent <id> --rule "Invariant or context visible to agents"
 cst revise <id> [--parent <id>] [--intent "..." | --rule "..."] [--verify "..." | --check <name=cmd>... | --review "..."] [--exec-cwd <path>] [--private-exec-cwd|--shared-exec-cwd] [--scope <path> ... | --clear-scope] [--invariant "..."] [--non-goal "..."] [--success-obligation <name>] [--clear-context] [--owned <path>] [--excluded <path>] [--clear-boundary] [--obligation-claim <name> | --clear-obligation-claims] [--after <id> ... | --clear-after] [--reason "..."]
 
-cst brief [--within <id>] [--history]
+cst brief [--within <id>] [--history] [--include-archived]
 cst claims [--within <id>]
 cst recover [--within <id>]
-cst show <id>
+cst show <id> [--include-archived]
+cst archive-plan [--within <id>]
 cst events --for <id>
 cst events --attempt <attempt-id>
 cst events --since <event-id>
 cst events --for <id> --attempt <attempt-id> --since <event-id>
 cst events --all --raw
-cst ui [--within <id>] [-o <path>] [--no-open] [--stdout]
+cst ui [--within <id>] [--include-archived] [-o <path>] [--no-open] [--stdout]
 
 cst take [<task-id>] [--exec-cwd <path>] [--private-exec-cwd] [--scope <path> ...]
 cst release <task-id>
@@ -231,6 +276,9 @@ cst worker-status <task-id>
 cst worker-run <task-id> --action <action-id> [--commit <sha>]
 cst evidence <id> --kind <kind> --summary "..." [--data JSON]
 cst evidence <id> --kind note --summary "Process note..."
+cst rule promote <rule-id> --to <ancestor-id> --reason "..."
+cst archive <id> --reason "..."
+cst unarchive <id> --reason "..."
 cst done <task-id> [--exec-cwd <checkout-root>] [--commit <sha>]
 cst done <task-id> --from-acceptance <acceptance-run-set-evidence-id> [--commit <sha>]
 cst done <task-id> [--evidence <event-id> ... | --note "..."]
@@ -514,6 +562,7 @@ Held tasks still keep the root open. They are not completion.
   work nodes that still contain open tasks.
 - `completed_subtrees_meta`: completed/canceled child work hidden from the
   default frontier view.
+- `archived_subtrees_meta`: archived child work hidden from the default view.
 - `ready`: tasks eligible for `take`.
 - `review_ready`: ready tasks with review acceptance.
 - `waiting_on`: tasks paused by incomplete `--after` prerequisites.
@@ -529,12 +578,17 @@ Use `cst brief --history` when you explicitly need completed child subtrees and
 historical recent runs/failures. The default brief is an operator view of the
 current frontier, not a full history browser.
 
+Use `--include-archived` only when you need folded terminal history. Archived
+subtrees stay present in raw replay and explicit projections; they are hidden
+from default brief/UI so current frontier context stays small.
+
 ## Show And Events
 
 `cst show <id>` is a bounded single-node view. It includes scalar node facts,
 aggregate progress, inherited rules, completed evidence ids, closure
 boundary/rationale/contest projection, and bounded previews of children, recent
-runs, and recent evidence. It is not a subtree dump.
+runs, and recent evidence. Archived children are folded by default; use
+`--include-archived` to include them. It is not a subtree dump.
 
 `cst worker-status <task-id>` is a bounded worker view over one task. It derives
 legal bound actions from the same admissibility predicate used by completion, and
@@ -543,7 +597,8 @@ re-read this frontier before executing an action id.
 
 `cst ui` renders the same bounded frontier, completed evidence ids, closure
 summary, and contested state for browser review. It is a projection, not another
-task source.
+task source. It folds archived terminal history unless `--include-archived` is
+set.
 
 Use explicit event ranges for history:
 
