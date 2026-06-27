@@ -46,6 +46,16 @@ func (n *Node) CanHaveEvidence() bool {
 	return n.Kind == KindGoal || n.Kind == KindTask
 }
 
+func cloneRuleOrigin(origin *RuleOrigin) *RuleOrigin {
+	if origin == nil {
+		return nil
+	}
+	return &RuleOrigin{
+		SourceRuleID: origin.SourceRuleID,
+		Reason:       origin.Reason,
+	}
+}
+
 // Root returns the store's single root goal, if any.
 func (s *State) Root() *Node {
 	for _, id := range s.Order {
@@ -99,6 +109,20 @@ func (s *State) ancestorChain(nodeID int64) []int64 {
 		cur = n.ParentID
 	}
 	return chain
+}
+
+func (s *State) IsArchived(nodeID int64) bool {
+	for cur := nodeID; cur != 0; {
+		n := s.Nodes[cur]
+		if n == nil {
+			return false
+		}
+		if n.Archived {
+			return true
+		}
+		cur = n.ParentID
+	}
+	return false
 }
 
 // CanComplete returns whether a task may transition to completed: all child

@@ -18,6 +18,8 @@ const (
 	EvScriptRun      = "script_run"
 	EvTaskCompleted  = "task_completed"
 	EvNodeCanceled   = "node_canceled"
+	EvNodeArchived   = "node_archived"
+	EvNodeUnarchived = "node_unarchived"
 )
 
 const (
@@ -91,6 +93,11 @@ type ArtifactRef struct {
 	ByteSize int64  `json:"byte_size"`
 }
 
+type RuleOrigin struct {
+	SourceRuleID int64  `json:"source_rule_id"`
+	Reason       string `json:"reason,omitempty"`
+}
+
 type LegacyGate struct {
 	Kind   string `json:"kind"`
 	Cmd    string `json:"cmd,omitempty"`
@@ -110,6 +117,7 @@ type Event struct {
 	Kind             string             `json:"kind,omitempty"`
 	Intent           string             `json:"intent,omitempty"`
 	RuleText         string             `json:"rule_text,omitempty"`
+	RuleOrigin       *RuleOrigin        `json:"rule_origin,omitempty"`
 	Acceptance       *Acceptance        `json:"acceptance,omitempty"`
 	Envelope         *ExecutionEnvelope `json:"execution_envelope,omitempty"`
 	Context          *NodeContext       `json:"context,omitempty"`

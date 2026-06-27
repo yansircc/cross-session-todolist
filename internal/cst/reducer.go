@@ -101,6 +101,9 @@ func (s *State) applyOne(e *Event) error {
 			if len(e.After) > 0 || e.AfterSet {
 				return fmt.Errorf("rule #%d cannot have prerequisites", e.NodeID)
 			}
+			if err := s.validateRuleOrigin(e); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("node #%d has unknown kind %q", e.NodeID, e.Kind)
 		}
@@ -129,6 +132,7 @@ func (s *State) applyOne(e *Event) error {
 			Kind:             e.Kind,
 			Intent:           e.Intent,
 			RuleText:         e.RuleText,
+			RuleOrigin:       cloneRuleOrigin(e.RuleOrigin),
 			Acceptance:       e.Acceptance,
 			Envelope:         cloneExecutionEnvelope(e.Envelope),
 			Context:          context,
@@ -626,6 +630,39 @@ func (s *State) applyOne(e *Event) error {
 			s.closeAttempt(e.AttemptID, e.Type, e.Timestamp)
 		}
 		s.canceledOrder = append(s.canceledOrder, n.ID)
+	case EvNodeArchived:
+		n, ok := s.Nodes[e.NodeID]
+		if !ok {
+			return fmt.Errorf("node_archived targets missing node #%d", e.NodeID)
+		}
+		if e.Reason == "" {
+			return fmt.Errorf("node_archived #%d requires reason", e.NodeID)
+		}
+		if n.Archived {
+			return fmt.Errorf("node_archived #%d already archived", e.NodeID)
+		}
+		if err := s.validateArchiveTarget(n); err != nil {
+			return err
+		}
+		n.Archived = true
+		n.ArchivedAt = e.Timestamp
+		n.ArchivedReason = e.Reason
+		n.LastEvent = e.Timestamp
+	case EvNodeUnarchived:
+		n, ok := s.Nodes[e.NodeID]
+		if !ok {
+			return fmt.Errorf("node_unarchived targets missing node #%d", e.NodeID)
+		}
+		if e.Reason == "" {
+			return fmt.Errorf("node_unarchived #%d requires reason", e.NodeID)
+		}
+		if !n.Archived {
+			return fmt.Errorf("node_unarchived #%d is not archived", e.NodeID)
+		}
+		n.Archived = false
+		n.ArchivedAt = time.Time{}
+		n.ArchivedReason = ""
+		n.LastEvent = e.Timestamp
 	default:
 		return fmt.Errorf("unknown event type %q", e.Type)
 	}
@@ -635,6 +672,62 @@ func (s *State) applyOne(e *Event) error {
 	s.Revision.EventCount++
 	s.Revision.LastEventID = e.EventID
 	s.Revision.LastEventAt = e.Timestamp
+	return nil
+}
+
+func (s *State) validateRuleOrigin(e *Event) error {
+	if e.RuleOrigin == nil {
+		return nil
+	}
+	if e.RuleOrigin.SourceRuleID == 0 {
+		return fmt.Errorf("rule #%d promotion missing source_rule_id", e.NodeID)
+	}
+	if strings.TrimSpace(e.RuleOrigin.Reason) == "" {
+		return fmt.Errorf("rule #%d promotion requires reason", e.NodeID)
+	}
+	source := s.Nodes[e.RuleOrigin.SourceRuleID]
+	if source == nil {
+		return fmt.Errorf("rule #%d promotion source #%d missing", e.NodeID, e.RuleOrigin.SourceRuleID)
+	}
+	if source.Kind != KindRule {
+		return fmt.Errorf("rule #%d promotion source #%d is %s, not rule", e.NodeID, source.ID, source.Kind)
+	}
+	if source.Canceled {
+		return fmt.Errorf("rule #%d promotion source #%d is canceled", e.NodeID, source.ID)
+	}
+	if e.RuleText != source.RuleText {
+		return fmt.Errorf("rule #%d promotion text must match source rule #%d", e.NodeID, source.ID)
+	}
+	if e.ParentID == source.ParentID {
+		return fmt.Errorf("rule #%d promotion target is already source parent #%d", e.NodeID, e.ParentID)
+	}
+	if !s.isAncestor(e.ParentID, source.ParentID) {
+		return fmt.Errorf("rule #%d promotion target #%d is not an ancestor of source rule #%d parent #%d", e.NodeID, e.ParentID, source.ID, source.ParentID)
+	}
+	return nil
+}
+
+func (s *State) validateArchiveTarget(n *Node) error {
+	if !n.CanParentWork() {
+		return fmt.Errorf("node_archived targets %s #%d; archive applies to goal/task subtrees", n.Kind, n.ID)
+	}
+	if n.ParentID == 0 {
+		return fmt.Errorf("node_archived cannot archive root goal #%d", n.ID)
+	}
+	for _, child := range s.SubtreeNodes(n.ID) {
+		if child.ID == n.ID {
+			continue
+		}
+		if child.Kind == KindTask && !child.Terminal() {
+			return fmt.Errorf("node_archived target #%d has active descendant task #%d", n.ID, child.ID)
+		}
+	}
+	if n.Kind == KindTask && !n.Terminal() {
+		return fmt.Errorf("node_archived target task #%d is not terminal", n.ID)
+	}
+	if n.Kind == KindGoal && s.NodeStatus(n) != StatusCompleted {
+		return fmt.Errorf("node_archived target goal #%d is not completed", n.ID)
+	}
 	return nil
 }
 

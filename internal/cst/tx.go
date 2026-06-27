@@ -242,6 +242,56 @@ func (tx *Tx) CreateRule(parent int64, text string) (*Event, error) {
 	return ev, nil
 }
 
+func (tx *Tx) PromoteRule(sourceRuleID int64, targetParentID int64, reason string) (*Event, error) {
+	if sourceRuleID == 0 {
+		return nil, herr(ExitUsage, "rule promote requires a source rule id")
+	}
+	if targetParentID == 0 {
+		return nil, herr(ExitUsage, "rule promote requires --to <ancestor-id>")
+	}
+	if reason == "" {
+		return nil, herr(ExitUsage, "rule promote requires --reason")
+	}
+	source := tx.state.Nodes[sourceRuleID]
+	if source == nil {
+		return nil, herr(ExitNotFound, "source rule #%d not found", sourceRuleID)
+	}
+	if source.Kind != KindRule {
+		return nil, herr(ExitInvariantBroken, "source #%d is %s, not rule", sourceRuleID, source.Kind)
+	}
+	if source.Canceled {
+		return nil, herr(ExitInvariantBroken, "source rule #%d is canceled", sourceRuleID)
+	}
+	target := tx.state.Nodes[targetParentID]
+	if target == nil {
+		return nil, herr(ExitNotFound, "target parent #%d not found", targetParentID)
+	}
+	if target.Terminal() {
+		return nil, herr(ExitInvariantBroken, "target parent #%d is terminal", targetParentID)
+	}
+	if !target.CanParentWork() {
+		return nil, herr(ExitInvariantBroken, "target parent #%d is %s, not goal/task", targetParentID, target.Kind)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeCreated,
+		NodeID:    tx.state.NextID,
+		ParentID:  targetParentID,
+		Kind:      KindRule,
+		RuleText:  source.RuleText,
+		RuleOrigin: &RuleOrigin{
+			SourceRuleID: sourceRuleID,
+			Reason:       reason,
+		},
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
 type ReviseSpec struct {
 	ParentSet           bool
 	Parent              int64
@@ -785,6 +835,59 @@ func (tx *Tx) CancelNode(id int64, reason string) (*Event, error) {
 		Actor:     tx.actor,
 		Type:      EvNodeCanceled,
 		AttemptID: tx.attemptIDForActorClaim(id),
+		NodeID:    id,
+		Reason:    reason,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) ArchiveNode(id int64, reason string) (*Event, error) {
+	if reason == "" {
+		return nil, herr(ExitUsage, "archive requires --reason")
+	}
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "node #%d not found", id)
+	}
+	if n.Archived {
+		return nil, herr(ExitInvariantBroken, "node #%d already archived", id)
+	}
+	if err := tx.state.validateArchiveTarget(n); err != nil {
+		return nil, herr(ExitInvariantBroken, "%s", err.Error())
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeArchived,
+		NodeID:    id,
+		Reason:    reason,
+	}
+	if err := tx.applyAndQueue(ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+func (tx *Tx) UnarchiveNode(id int64, reason string) (*Event, error) {
+	if reason == "" {
+		return nil, herr(ExitUsage, "unarchive requires --reason")
+	}
+	n, ok := tx.state.Nodes[id]
+	if !ok {
+		return nil, herr(ExitNotFound, "node #%d not found", id)
+	}
+	if !n.Archived {
+		return nil, herr(ExitInvariantBroken, "node #%d is not archived", id)
+	}
+	ev := &Event{
+		EventID:   NewEventID(),
+		Timestamp: tx.now,
+		Actor:     tx.actor,
+		Type:      EvNodeUnarchived,
 		NodeID:    id,
 		Reason:    reason,
 	}

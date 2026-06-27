@@ -106,6 +106,7 @@ type Node struct {
 	Kind                    string             `json:"kind"`
 	Intent                  string             `json:"intent,omitempty"`
 	RuleText                string             `json:"rule_text,omitempty"`
+	RuleOrigin              *RuleOrigin        `json:"rule_origin,omitempty"`
 	Acceptance              *Acceptance        `json:"acceptance,omitempty"`
 	Envelope                *ExecutionEnvelope `json:"execution_envelope,omitempty"`
 	Context                 *NodeContext       `json:"context,omitempty"`
@@ -131,6 +132,9 @@ type Node struct {
 	Canceled             bool      `json:"canceled,omitempty"`
 	CanceledAt           time.Time `json:"canceled_at,omitempty"`
 	CanceledReason       string    `json:"canceled_reason,omitempty"`
+	Archived             bool      `json:"archived,omitempty"`
+	ArchivedAt           time.Time `json:"archived_at,omitempty"`
+	ArchivedReason       string    `json:"archived_reason,omitempty"`
 
 	// runtime
 	Claim     *Claim            `json:"claim,omitempty"`
