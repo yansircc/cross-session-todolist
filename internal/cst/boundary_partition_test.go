@@ -61,6 +61,52 @@ func TestBoundaryPartitionAllowsCompletedSiblingPathReuse(t *testing.T) {
 	}
 }
 
+func TestBoundaryPartitionAllowsDerivedCompletedGoalSiblingPathReuse(t *testing.T) {
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root", Boundary: &NodeBoundary{Owned: []string{"."}}},
+		{EventID: "historical-goal", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindGoal, Intent: "historical goal", Boundary: &NodeBoundary{Owned: []string{"product-loop"}}},
+		{EventID: "historical-task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 3, ParentID: 2, Kind: KindTask, Intent: "historical task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"product-loop"}}},
+		{EventID: "claim-historical", Timestamp: now, Actor: "a", Type: EvClaimTaken,
+			NodeID: 3, AttemptID: "attempt-historical", LeaseID: "lease-historical", LeaseExpiresAt: &exp},
+		{EventID: "evidence-historical", Timestamp: now, Actor: "a", Type: EvEvidence,
+			NodeID: 3, AttemptID: "attempt-historical", EvidenceKind: EvidenceNote, EvidenceSummary: "reviewed"},
+		{EventID: "done-historical", Timestamp: now, Actor: "a", Type: EvTaskCompleted,
+			NodeID: 3, AttemptID: "attempt-historical", EvidenceIDs: []string{"evidence-historical"}},
+		{EventID: "future-task", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 4, ParentID: 1, Kind: KindTask, Intent: "future task", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"product-loop/bun.lock"}}},
+	}
+	state, err := Apply(events)
+	if err != nil {
+		t.Fatalf("expected derived-completed goal boundary reuse to pass, got %v", err)
+	}
+	if state.NodeStatus(state.Nodes[2]) != StatusCompleted {
+		t.Fatalf("historical goal should be derived-completed, got %s", state.NodeStatus(state.Nodes[2]))
+	}
+}
+
+func TestBoundaryPartitionRejectsActiveGoalSiblingOverlap(t *testing.T) {
+	now := time.Now()
+	events := []*Event{
+		{EventID: "root", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 1, Kind: KindGoal, Intent: "root", Boundary: &NodeBoundary{Owned: []string{"."}}},
+		{EventID: "active-goal", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 2, ParentID: 1, Kind: KindGoal, Intent: "active goal", Boundary: &NodeBoundary{Owned: []string{"product-loop"}}},
+		{EventID: "open-child", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 3, ParentID: 2, Kind: KindTask, Intent: "open child", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"product-loop/src"}}},
+		{EventID: "overlap", Timestamp: now, Actor: "a", Type: EvNodeCreated,
+			NodeID: 4, ParentID: 1, Kind: KindTask, Intent: "overlap", Acceptance: &Acceptance{Kind: AcceptanceReview, Who: "self"}, Boundary: &NodeBoundary{Owned: []string{"product-loop/bun.lock"}}},
+	}
+	_, err := Apply(events)
+	if err == nil || !strings.Contains(err.Error(), "overlapping owned boundaries") {
+		t.Fatalf("expected active goal sibling overlap rejection, got %v", err)
+	}
+}
+
 func TestDoneRejectsNodeBoundaryOwnedViolation(t *testing.T) {
 	dir := withTempStore(t)
 	initGitRepo(t, dir)

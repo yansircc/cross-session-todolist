@@ -223,6 +223,54 @@ func TestNextReconcilesDiffCoveredOnlyByCompletedNodeBoundary(t *testing.T) {
 	}
 }
 
+func TestNextReconcileRepairCanAddTaskAfterCompletedGoalBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{
+		Intent:   "root",
+		Boundary: &NodeBoundary{Owned: []string{"."}},
+	})
+	mustDoAdd(t, AddArgs{
+		Parent:   1,
+		Goal:     true,
+		Intent:   "historical workstream",
+		Boundary: &NodeBoundary{Owned: []string{"product-loop"}},
+	})
+	mustDoAdd(t, AddArgs{
+		Parent:           2,
+		Intent:           "historical task",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"product-loop"}},
+	})
+	if err := DoTake(io.Discard, 3, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoDone(io.Discard, 3, DoneArgs{Note: "reviewed"}, false); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "product-loop/bun.lock", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseReconcile || view.Repair == nil {
+		t.Fatalf("dirty diff under completed goal should require reconcile: %+v", view)
+	}
+	if len(view.UnreconciledDiffs) != 1 || view.UnreconciledDiffs[0].Path != "product-loop/bun.lock" {
+		t.Fatalf("wrong unreconciled diff projection: %+v", view.UnreconciledDiffs)
+	}
+	if !strings.Contains(view.Repair.Commands[0], "--parent 1") || !strings.Contains(view.Repair.Commands[0], "--owned product-loop/bun.lock") {
+		t.Fatalf("repair command should point at root with dirty path ownership: %+v", view.Repair.Commands)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "reconcile dirty lockfile",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"product-loop/bun.lock"}},
+	}, false); err != nil {
+		t.Fatalf("next reconcile repair shape must be legal for reducer, got %v", err)
+	}
+}
+
 func TestNextReconcileRepairQuotesDirtyPath(t *testing.T) {
 	dir := withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")

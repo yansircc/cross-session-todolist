@@ -5,7 +5,7 @@ import "fmt"
 func (s *State) validateBoundaryPartition() error {
 	for _, id := range s.Order {
 		n := s.Nodes[id]
-		if !participatesInBoundaryPartition(n) {
+		if !s.participatesInBoundaryPartition(n) {
 			continue
 		}
 		if n.ParentID != 0 {
@@ -26,12 +26,12 @@ func (s *State) validateBoundaryPartition() error {
 		}
 		for i, leftID := range parent.Children {
 			left := s.Nodes[leftID]
-			if !participatesInBoundaryPartition(left) {
+			if !s.participatesInBoundaryPartition(left) {
 				continue
 			}
 			for _, rightID := range parent.Children[i+1:] {
 				right := s.Nodes[rightID]
-				if !participatesInBoundaryPartition(right) {
+				if !s.participatesInBoundaryPartition(right) {
 					continue
 				}
 				if pathsOverlap(left.Boundary.Owned, right.Boundary.Owned) {
@@ -43,8 +43,22 @@ func (s *State) validateBoundaryPartition() error {
 	return nil
 }
 
-func participatesInBoundaryPartition(n *Node) bool {
-	return n != nil && !n.Terminal() && n.Boundary != nil && len(n.Boundary.Owned) > 0
+func (s *State) participatesInBoundaryPartition(n *Node) bool {
+	if n == nil || n.Boundary == nil || len(n.Boundary.Owned) == 0 {
+		return false
+	}
+	if n.Kind == KindTask {
+		return !n.Terminal()
+	}
+	if n.Kind != KindGoal {
+		return false
+	}
+	if s.NodeStatus(n) != StatusCompleted {
+		return true
+	}
+	// An empty goal is still an active modeling surface; only a goal with
+	// completed descendant work has become historical boundary evidence.
+	return s.SubtreeProgress(n.ID).TotalTasks == 0
 }
 
 func validateNodeBoundaryCompletion(n *Node, runSet EvidenceRecord) error {
