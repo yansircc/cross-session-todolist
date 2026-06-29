@@ -34,7 +34,7 @@ func (s *State) validateBoundaryPartition() error {
 				if !s.participatesInBoundaryPartition(right) {
 					continue
 				}
-				if pathsOverlap(left.Boundary.Owned, right.Boundary.Owned) {
+				if pathsOverlap(left.Boundary.Owned, right.Boundary.Owned) && !s.orderedByPrerequisite(left, right) {
 					return fmt.Errorf("boundary partition violation: sibling nodes #%d and #%d have overlapping owned boundaries", left.ID, right.ID)
 				}
 			}
@@ -59,6 +59,13 @@ func (s *State) participatesInBoundaryPartition(n *Node) bool {
 	// An empty goal is still an active modeling surface; only a goal with
 	// completed descendant work has become historical boundary evidence.
 	return s.SubtreeProgress(n.ID).TotalTasks == 0
+}
+
+func (s *State) orderedByPrerequisite(left *Node, right *Node) bool {
+	if left == nil || right == nil || left.Kind != KindTask || right.Kind != KindTask {
+		return false
+	}
+	return s.hasPrereqPath(left.ID, right.ID) || s.hasPrereqPath(right.ID, left.ID)
 }
 
 func validateNodeBoundaryCompletion(n *Node, runSet EvidenceRecord) error {

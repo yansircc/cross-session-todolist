@@ -164,6 +164,32 @@ func TestNextSelectsDirtyOwnerTaskInsteadOfFirstReadyTask(t *testing.T) {
 	}
 }
 
+func TestNextSelectsCurrentOwnerWhenFutureOrderedTaskSharesBoundary(t *testing.T) {
+	dir := withTempStore(t)
+	t.Setenv("CST_ACTOR", "alice")
+	initGitRepo(t, dir)
+	mustDoAdd(t, AddArgs{Intent: "root"})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "current owner",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	})
+	mustDoAdd(t, AddArgs{
+		Parent:           1,
+		Intent:           "future owner",
+		AcceptanceReview: "self",
+		After:            []int64{2},
+		Boundary:         &NodeBoundary{Owned: []string{"src/file"}},
+	})
+	writeFile(t, dir, "src/file/work.txt", "dirty\n")
+
+	view := currentNextView(t)
+	if view.Phase != NextPhaseWork || view.Action == nil || view.Action.TaskID != 2 {
+		t.Fatalf("next should select current owner while future owner waits, got %+v", view)
+	}
+}
+
 func TestNextReconcilesDirtyDiffOutsideCurrentClaimBoundary(t *testing.T) {
 	dir := withTempStore(t)
 	t.Setenv("CST_ACTOR", "alice")

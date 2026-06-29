@@ -89,6 +89,81 @@ func TestBoundaryPartitionAllowsDerivedCompletedGoalSiblingPathReuse(t *testing.
 	}
 }
 
+func TestBoundaryPartitionAllowsAfterOrderedSiblingOverlap(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "current owner",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "future owner",
+		AcceptanceReview: "self",
+		After:            []int64{2},
+		Boundary:         &NodeBoundary{Owned: []string{"src/file"}},
+	}, false); err != nil {
+		t.Fatalf("after-ordered sibling overlap should be legal, got %v", err)
+	}
+	state := replayState(t)
+	if owner := dirtyOwnerForPath(state, "src/file/work.txt"); owner == nil || owner.ID != 2 {
+		t.Fatalf("current owner should remain the dirty owner before handoff, got %+v", owner)
+	}
+	if err := DoTake(io.Discard, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoDone(io.Discard, 2, DoneArgs{Note: "reviewed"}, false); err != nil {
+		t.Fatal(err)
+	}
+	state = replayState(t)
+	if !state.IsReadyTask(3) {
+		t.Fatal("future owner should become ready after predecessor completes")
+	}
+	if owner := dirtyOwnerForPath(state, "src/file/work.txt"); owner == nil || owner.ID != 3 {
+		t.Fatalf("dirty owner should advance after predecessor completion, got %+v", owner)
+	}
+}
+
+func TestBoundaryPartitionRejectsUnorderedTasksWithSharedPrerequisiteOverlap(t *testing.T) {
+	withTempStore(t)
+	if err := DoAdd(io.Discard, AddArgs{Intent: "root"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "setup",
+		AcceptanceReview: "self",
+		Boundary:         &NodeBoundary{Owned: []string{"setup"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "future owner",
+		AcceptanceReview: "self",
+		After:            []int64{2},
+		Boundary:         &NodeBoundary{Owned: []string{"src"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	err := DoAdd(io.Discard, AddArgs{
+		Parent:           1,
+		Intent:           "unordered peer",
+		AcceptanceReview: "self",
+		After:            []int64{2},
+		Boundary:         &NodeBoundary{Owned: []string{"src/file"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "overlapping owned boundaries") {
+		t.Fatalf("expected unordered peer overlap rejection, got %v", err)
+	}
+}
+
 func TestBoundaryPartitionRejectsActiveGoalSiblingOverlap(t *testing.T) {
 	now := time.Now()
 	events := []*Event{
